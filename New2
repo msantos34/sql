@@ -1,0 +1,413 @@
+--//////>> PARAMETROS
+
+--@set var_periodo_inicio = '2026-08-01'::date
+--@set var_periodo_fim = '2026-09-30'::date
+
+
+
+--//////>> 1. CLIENTES ATIVOS — 1 linha por cliente x mês
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddclientesativos;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddclientesativos
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, dat_reference) as
+	select
+		  date_trunc( 'month', marg.dat_reference )::date													as dat_reference
+		, marg.idt_safepay_creditor																			as idt_safepay_user
+		, sum( coalesce( marg.num_tpv_value, 0 ) )															as tpv
+		, sum( coalesce( marg.num_contribution_margin, 0 ) + coalesce( marg.num_financial_costs, 0 ) )		as mo
+		, sum(
+			  coalesce( marg.num_gross_intermediation_revenue, 0 )
+			+ coalesce( marg.num_gross_installment_revenue, 0 )
+			+ coalesce( marg.num_gross_anticipation_value, 0 )
+			+ coalesce( marg.num_gross_debit_slip, 0 )
+			+ coalesce( marg.num_gross_cred_slip, 0 )
+		  )																									as rb
+		, case
+			when tpv >= 0			and tpv < 3000															then '01. De 0 a 3k'
+			when tpv >= 3000		and tpv < 5000															then '02. De 3 a 5k'
+			when tpv >= 5000		and tpv < 15000															then '03. De 5 a 15k'
+			when tpv >= 15000		and tpv < 50000															then '04. De 15 a 50k'
+			when tpv >= 50000		and tpv < 100000														then '05. De 50 a 100k'
+			when tpv >= 100000		and tpv < 500000														then '06. De 100 a 500k'
+			when tpv >= 500000		and tpv < 3000000														then '07. De 500 a 3MM'
+			when tpv >= 3000000																				then '08. Acima de 3MM'
+			end																								as faixa_tpv
+		, substring( faixa_tpv, 1, 2 )::int																	as ordem_faixa
+	from
+		dax_share_dax.ent_margin_summary marg
+	where 1=1
+		and ( marg.dat_reference >= ${var_periodo_inicio} and marg.dat_reference <= ${var_periodo_fim} )
+	group by 1, 2
+	having sum( coalesce( marg.num_tpv_value, 0 ) ) > 0 --> cliente ativo = TPV > 0 no mês
+	;
+
+
+
+--//////>> 2. CLIENTES POLO
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddpolo;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddpolo
+distkey(idt_safepay_user) as
+	select
+		  polo.idt_safepay_user
+		, polo.des_company
+		, initcap( polo.nam_executive )																		as nam_executivo_polo
+		, polo.nam_current_executive																		as nam_user
+	from
+		dax_share_dax.tbl_vl_extc_polo polo
+	join
+		( select distinct idt_safepay_user from planejamentocomercial_work.msantos34_ddclientesativos ) cli
+		on polo.idt_safepay_user = cli.idt_safepay_user
+	where 1=1
+		and polo.polo_empresas in ( 0, 2, 3 ) --> filtra apenas polo excluindo empresas
+	group by all
+	;
+
+
+
+--//////>> 3. CLIENTES + PORTFÓLIO + FLAG POLO — 1 linha por cliente x mês
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddclientes;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddclientes
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, dat_reference) as
+	select
+		  cli.dat_reference
+		, cli.idt_safepay_user
+		, port.des_portfolio
+		, case
+			when polo.idt_safepay_user is not null															then 'POLO'
+			else																							'NÃO POLO'
+			end																								as flg_polo
+		, cli.tpv
+		, cli.mo
+		, cli.rb
+		, cli.faixa_tpv
+		, cli.ordem_faixa
+	from
+		planejamentocomercial_work.msantos34_ddclientesativos cli
+	left join
+		( select distinct idt_safepay_user from planejamentocomercial_work.msantos34_ddpolo ) polo
+		on cli.idt_safepay_user = polo.idt_safepay_user
+	left join
+		(
+			select
+				  idt_safepay_user
+				, max( des_portfolio )																		as des_portfolio --> garante 1 portfólio por cliente
+			from
+				dax_share_dax.ent_customer_portfolio_psp
+			where 1=1
+				and flg_active = 'A'
+			group by 1
+		) port
+		on cli.idt_safepay_user = port.idt_safepay_user
+	;
+
+
+
+--//////>> 4. PRODUTOS — 1 linha por cliente x mês x produto
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_dfprodutos;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_dfprodutos
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, dat_reference) as
+	select
+		  dat_reference
+		, idt_safepay_user
+		, produto
+		, produto_agrupado
+		, sum( tpv_vw )																						as tpv_vw
+		, sum( mo_vw )																						as mo_vw
+		, sum( rb_vw )																						as rb_vw
+		, sum( auc_vw )																						as auc_vw
+		, sum( tpn_vw )																						as tpn_vw
+		, sum( imposto_vw )																					as imposto_vw
+		, sum( custos_vw )																					as custos_vw
+		, sum( pdd_vw )																						as pdd_vw
+		, sum( mc_vw )																						as mc_vw
+		, sum( custo_financeiro_vw )																		as custo_financeiro_vw
+	from
+		(
+			select
+				  cli.dat_reference
+				, cli.idt_safepay_user
+				, case vw.cod_product
+					when 'FUNDS_ADDITION'																	then '01. Adição de Fundos'
+					when 'CARD_ACCOUNT'																		then '02. Cartão da Conta'
+					when 'CARD_CREDIT'																		then '03. Cartão de Crédito'
+					when 'CARD_DEBIT'																		then '04. Cartão de Débito'
+					when 'CARD_MULTIPLE'																	then '05. Cartão Multiplo'
+					when 'CARD_PREPAID'																		then '06. Cartão Pre-Pago'
+					when 'PAGINVEST_CDB'																	then '07. CDB'
+					when 'PAYROLL_LOAN'																		then '08. Consignado'
+					when 'INCOME_ACCOUNT_DIGITAL_ACCOUNT'													then '09. FLOAT - Conta Digital'
+					when 'INCOME_ACCOUNT_PAGINVEST'															then '10. FLOAT - Paginvest'
+					when 'PAGINVEST_FUNDOS_INVESTIMENTO'													then '11. Fundo de Investimento'
+					when 'LOAN'																				then '12. K-Giro'
+					when 'BILL_PAYMENT_CARD'																then '13. Pgto de Contas - Cartão'
+					when 'BILL_PAYMENT_BALANCE'																then '14. Pgto de Contas - Saldo'
+					when 'PIX_ENVIADO'																		then '15. Pix Enviado'
+					when 'PIX_INSTALLMENTS'																	then '16. Pix Parcelado'
+					when 'PIX_RECEBIDO'																		then '17. Pix Recebido'
+					when 'PHONE_RECHARGE'																	then '18. Recarga de Celular'
+					when 'SERVICES_RECHARGE'																then '19. Recarga de Serviços'
+					when 'INSURANCE_BUSINESS'																then '20. Seguro'
+					when 'INSURANCE_CARD_ACCOUNT'															then '20. Seguro'
+					when 'INSURANCE_CELLPHONE'																then '20. Seguro'
+					when 'INSURANCE_HEALTH'																	then '20. Seguro'
+					when 'INSURANCE_PERSONAL'																then '20. Seguro'
+					when 'INSURANCE_PIX'																	then '20. Seguro'
+					when 'INSURANCE_RESIDENTIAL'															then '20. Seguro'
+					when 'ADMINISTRATIVE_FEE'																then '21. Tarifa Administrativa'
+					when 'TED'																				then '22. TED'
+					when 'PAGINVEST_TESOURO_DIRETO'															then '23. Tesouro Direto'
+					else																					'99. Não mapeado - ' || vw.cod_product
+					end																						as produto
+				, case
+					when vw.cod_product in ( 'CARD_ACCOUNT', 'CARD_CREDIT', 'CARD_DEBIT'
+										   , 'CARD_MULTIPLE', 'CARD_PREPAID' )								then 'Cartões'
+					when vw.cod_product in ( 'PAGINVEST_CDB', 'PAGINVEST_FUNDOS_INVESTIMENTO'
+										   , 'PAGINVEST_TESOURO_DIRETO' )									then 'Investimentos' --> ajuste se quiser CDB separado
+					when vw.cod_product in ( 'INCOME_ACCOUNT_DIGITAL_ACCOUNT', 'INCOME_ACCOUNT_PAGINVEST' )	then 'FLOAT'
+					when vw.cod_product in ( 'BILL_PAYMENT_CARD', 'BILL_PAYMENT_BALANCE' )					then 'Pagamentos'
+					when vw.cod_product in ( 'PHONE_RECHARGE', 'SERVICES_RECHARGE' )						then 'Recargas'
+					when vw.cod_product in ( 'INSURANCE_BUSINESS', 'INSURANCE_CARD_ACCOUNT', 'INSURANCE_CELLPHONE'
+										   , 'INSURANCE_HEALTH', 'INSURANCE_PERSONAL', 'INSURANCE_PIX'
+										   , 'INSURANCE_RESIDENTIAL' )										then 'Seguro'
+					when vw.cod_product = 'LOAN'															then 'K-giro'
+					when vw.cod_product = 'PAYROLL_LOAN'													then 'Consignado'
+					else																					substring( produto, 5 ) --> demais: nome do produto sem o prefixo "NN. "
+					end																						as produto_agrupado
+				, vw.tpv																					as tpv_vw
+				, vw.mo																						as mo_vw
+				, vw.receita_bruta																			as rb_vw
+				, vw.auc																					as auc_vw
+				, vw.tpn																					as tpn_vw
+				, vw.imposto																				as imposto_vw
+				, vw.custos																					as custos_vw
+				, vw.pdd																					as pdd_vw
+				, vw.mc																						as mc_vw
+				, vw.custo_financeiro																		as custo_financeiro_vw
+			from
+				dax_share_dax.visao_geral_receitas vw
+			join
+				planejamentocomercial_work.msantos34_ddclientes cli
+				on  vw.idt_safepay_user = cli.idt_safepay_user
+				and vw.ano_mes = cli.dat_reference --> ano_mes precisa ser date no 1º dia do mês
+			where 1=1
+				and ( vw.ano_mes >= ${var_periodo_inicio} and vw.ano_mes <= ${var_periodo_fim} )
+		) base
+	group by 1, 2, 3, 4
+	;
+
+
+
+--//////>> 5. PRODUTOS NOS DOIS NÍVEIS — 1 linha por cliente x mês x nível x produto/grupo
+--          qtd_vinculos = quantos produtos o cliente tem naquele produto/grupo
+drop table if exists #prod_nivel;
+	select
+		  dat_reference
+		, idt_safepay_user
+		, 'Grupo'::varchar(10)																				as nivel
+		, produto_agrupado::varchar(100)																	as produto
+		, produto_agrupado::varchar(100)																	as produto_agrupado
+		, count(*)::bigint																					as qtd_vinculos --> ex.: crédito + débito = 2
+		, sum( tpv_vw )																						as tpv_vw
+		, sum( mo_vw )																						as mo_vw
+		, sum( rb_vw )																						as rb_vw
+		, sum( auc_vw )																						as auc_vw
+		, sum( tpn_vw )																						as tpn_vw
+		, sum( imposto_vw )																					as imposto_vw
+		, sum( custos_vw )																					as custos_vw
+		, sum( pdd_vw )																						as pdd_vw
+		, sum( mc_vw )																						as mc_vw
+		, sum( custo_financeiro_vw )																		as custo_financeiro_vw
+	into
+		#prod_nivel
+	from
+		planejamentocomercial_work.msantos34_dfprodutos
+	group by 1, 2, 3, 4, 5
+
+	union all
+
+	select
+		  dat_reference
+		, idt_safepay_user
+		, 'Produto'::varchar(10)																			as nivel
+		, produto::varchar(100)																				as produto
+		, produto_agrupado::varchar(100)																	as produto_agrupado
+		, 1::bigint																							as qtd_vinculos
+		, tpv_vw
+		, mo_vw
+		, rb_vw
+		, auc_vw
+		, tpn_vw
+		, imposto_vw
+		, custos_vw
+		, pdd_vw
+		, mc_vw
+		, custo_financeiro_vw
+	from
+		planejamentocomercial_work.msantos34_dfprodutos
+	;
+
+
+
+drop table if exists #niveis;
+create temp table #niveis ( nivel varchar(10) );
+insert into #niveis values ( 'Grupo' ), ( 'Produto' );
+
+
+
+--//////>> 6. DATASET FINAL
+--   count_ids / count_ids_prod         = vínculos (cliente conta 1x por produto, igual à query antiga)
+--   count_ids_unicos / _prod_unicos    = clientes únicos
+--   tpv / mo / rb (adquirência)        = cliente conta 1x por linha (não duplica dinheiro)
+drop table if exists #DSFULL;
+	--> 6.1 Produtos / grupos
+	select
+		  cli.dat_reference
+		, cli.des_portfolio
+		, cli.flg_polo
+		, cli.faixa_tpv
+		, cli.ordem_faixa
+		, p.nivel
+		, p.produto
+		, p.produto_agrupado
+		, sum( cli.tpv )																					as tpv
+		, sum( cli.mo )																						as mo
+		, sum( cli.rb )																						as rb
+		, sum( p.qtd_vinculos )																				as count_ids
+		, count( distinct cli.idt_safepay_user )															as count_ids_unicos
+		, sum( p.tpv_vw )																					as tpv_prod
+		, sum( p.mo_vw )																					as mo_prod
+		, sum( p.rb_vw )																					as rb_prod
+		, sum( p.auc_vw )																					as auc_prod
+		, sum( p.qtd_vinculos )																				as count_ids_prod
+		, count( distinct p.idt_safepay_user )																as count_ids_prod_unicos
+		, sum( p.tpn_vw )																					as tpn_prod
+		, sum( p.imposto_vw )																				as imposto_prod
+		, sum( p.custos_vw )																				as custos_prod
+		, sum( p.pdd_vw )																					as pdd_prod
+		, sum( p.mc_vw )																					as mc_prod
+		, sum( p.custo_financeiro_vw )																		as custo_financeiro_prod
+	into
+		#DSFULL
+	from
+		planejamentocomercial_work.msantos34_ddclientes cli
+	join
+		#prod_nivel p
+		on  p.idt_safepay_user = cli.idt_safepay_user
+		and p.dat_reference = cli.dat_reference
+	group by all
+
+	union all
+
+	--> 6.2 Sem Produto: clientes sem nenhum produto no mês (repetido em cada nível)
+	select
+		  cli.dat_reference
+		, cli.des_portfolio
+		, cli.flg_polo
+		, cli.faixa_tpv
+		, cli.ordem_faixa
+		, n.nivel
+		, '24. Sem Produto'::varchar(100)																	as produto
+		, 'Sem Produto'::varchar(100)																		as produto_agrupado
+		, sum( cli.tpv )																					as tpv
+		, sum( cli.mo )																						as mo
+		, sum( cli.rb )																						as rb
+		, count( distinct cli.idt_safepay_user )::bigint													as count_ids
+		, count( distinct cli.idt_safepay_user )::bigint													as count_ids_unicos
+		, null::decimal(38,4)																				as tpv_prod
+		, null::decimal(38,4)																				as mo_prod
+		, null::decimal(38,4)																				as rb_prod
+		, null::decimal(38,4)																				as auc_prod
+		, 0::bigint																							as count_ids_prod
+		, 0::bigint																							as count_ids_prod_unicos
+		, null::decimal(38,4)																				as tpn_prod
+		, null::decimal(38,4)																				as imposto_prod
+		, null::decimal(38,4)																				as custos_prod
+		, null::decimal(38,4)																				as pdd_prod
+		, null::decimal(38,4)																				as mc_prod
+		, null::decimal(38,4)																				as custo_financeiro_prod
+	from
+		planejamentocomercial_work.msantos34_ddclientes cli
+	cross join
+		#niveis n
+	where 1=1
+		and not exists (
+			select 1
+			from planejamentocomercial_work.msantos34_dfprodutos p
+			where p.idt_safepay_user = cli.idt_safepay_user
+			  and p.dat_reference = cli.dat_reference
+		)
+	group by all
+
+	union all
+
+	--> 6.3 Adquirência: todos os clientes ativos (repetido em cada nível)
+	select
+		  cli.dat_reference
+		, cli.des_portfolio
+		, cli.flg_polo
+		, cli.faixa_tpv
+		, cli.ordem_faixa
+		, n.nivel
+		, '00. Adquirência'::varchar(100)																	as produto
+		, 'Adquirência'::varchar(100)																		as produto_agrupado
+		, sum( cli.tpv )																					as tpv
+		, sum( cli.mo )																						as mo
+		, sum( cli.rb )																						as rb
+		, count( distinct cli.idt_safepay_user )::bigint													as count_ids
+		, count( distinct cli.idt_safepay_user )::bigint													as count_ids_unicos
+		, null::decimal(38,4)																				as tpv_prod
+		, null::decimal(38,4)																				as mo_prod
+		, null::decimal(38,4)																				as rb_prod
+		, null::decimal(38,4)																				as auc_prod
+		, null::bigint																						as count_ids_prod
+		, null::bigint																						as count_ids_prod_unicos
+		, null::decimal(38,4)																				as tpn_prod
+		, null::decimal(38,4)																				as imposto_prod
+		, null::decimal(38,4)																				as custos_prod
+		, null::decimal(38,4)																				as pdd_prod
+		, null::decimal(38,4)																				as mc_prod
+		, null::decimal(38,4)																				as custo_financeiro_prod
+	from
+		planejamentocomercial_work.msantos34_ddclientes cli
+	cross join
+		#niveis n
+	group by all
+	;
+
+
+
+--//////>> 7. OUTPUT
+select
+	  dat_reference
+	, des_portfolio
+	, flg_polo
+	, nivel																									--> FILTRAR NA TABELA DINÂMICA (Grupo OU Produto)
+	, produto
+	, produto_agrupado
+	, faixa_tpv
+	, ordem_faixa
+	, round( tpv, 2 )																						as tpv
+	, round( mo, 2 )																						as mo
+	, round( rb, 2 )																						as rb
+	, count_ids
+	, round( tpv_prod, 2 )																					as tpv_prod
+	, round( mo_prod, 2 )																					as mo_prod
+	, round( rb_prod, 2 )																					as rb_prod
+	, round( auc_prod, 2 )																					as auc_prod
+	, count_ids_prod
+	, round( tpn_prod, 2 )																					as tpn_prod
+	, round( imposto_prod, 2 )																				as imposto_prod
+	, round( custos_prod, 2 )																				as custos_prod
+	, round( pdd_prod, 2 )																					as pdd_prod
+	, round( mc_prod, 2 )																					as mc_prod
+	, round( custo_financeiro_prod, 2 )																		as custo_financeiro_prod
+	, count_ids_unicos
+	, count_ids_prod_unicos
+	, convert_timezone( 'UTC', 'America/Sao_Paulo', getdate() )												as dat_creation_table
+from
+	#DSFULL
+order by
+	nivel, des_portfolio, flg_polo, ordem_faixa, produto, dat_reference
+;
