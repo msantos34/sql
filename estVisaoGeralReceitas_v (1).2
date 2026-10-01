@@ -1,0 +1,342 @@
+
+
+
+--//////>> PARAMETROS
+
+--@set var_periodo_inicio = '2026-08-01'::date
+--@set var_periodo_fim = '2026-09-30'::date 
+
+
+
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddclientesativos;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddclientesativos
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, dat_reference) as 
+	select 
+		  date_trunc( 'month', marg.dat_reference )::date													as dat_reference
+		, marg.idt_safepay_creditor 																		as idt_safepay_user
+
+		, trunc( sum( marg.num_tpv_value ), 2 )																as tpv
+		, trunc( sum( marg.num_contribution_margin + marg.num_financial_costs ), 2 )						as mo
+		, trunc(
+			sum(
+				marg.num_gross_intermediation_revenue  +
+				marg.num_gross_installment_revenue +
+				marg.num_gross_anticipation_value +
+				marg.num_gross_debit_slip +
+				marg.num_gross_cred_slip 
+			)
+			, 2 
+		)																									as rb
+		, case
+	        when tpv >= 0 				and	tpv < 3000 														then '01. De 0 a 3k'
+	        when tpv >= 3000 			and tpv < 5000 														then '02. De 3 a 5k'
+	        when tpv >= 5000 			and tpv < 15000							 							then '03. De 5 a 15k'
+	        when tpv >= 15000 			and tpv < 50000							  							then '04. De 15 a 50k'
+	        when tpv >= 50000 			and tpv < 100000 						 							then '05. De 50 a 100k'
+	        when tpv >= 100000 			and tpv < 500000							 						then '06. De 100 a 500k'
+	        when tpv >= 500000 			and tpv < 3000000							 						then '07. De 500 a 3MM'
+	        when tpv >= 3000000 												 							then '08. Acima de 3MM'
+			end																								as faixa_tpv
+		, substring( faixa_tpv, 1,2 )::int																	as ordem_faixa
+	from
+		dax_share_dax.ent_margin_summary marg
+	where 1=1
+		and ( marg.dat_reference >= ${var_periodo_inicio} and marg.dat_reference <= ${var_periodo_fim} )
+		and marg.num_tpv_value > 0 --> clientes ativos
+	group by all
+	;
+
+
+
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddpolo;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddpolo
+distkey(idt_safepay_user) as
+	select  
+		  polo.idt_safepay_user
+		, polo.des_company
+		, initcap(polo.nam_executive)																		as nam_executivo_polo
+		, polo.nam_current_executive																		as nam_user
+--		, initcap(polo.nam_supervisor)																		as supervisor_polo
+--		, initcap(polo.nam_sub_regional)																	as coordenador_polo
+--		, initcap(polo.nam_district)																		as gerente_comercial
+--		, initcap(polo.nam_manager)																			as gerente_geral_polo
+--		, case 
+--			when des_origin ilike '%segmenta%' 																then 'SEGMENTACAO'
+--			when des_origin ilike '%gerenciado%' 															then 'GERENCIADO'
+--			else 'NOVO'
+--			end 																							as des_origin
+--        , case 
+--			when lower (nam_polo) like '% lt%' 																then 'LT' 
+--     		when lower (nam_polo) like '% virtual%' 														then 'VIRTUAL'
+--     		when lower (nam_polo) like '% sr%' 																then 'SENIOR'
+--			else 'PLENO' 
+--			end 																							as classif_polo
+--		, upper(polo.nam_polo)																				as nam
+--		, case
+--			when nam = 'BOLSÃO POLOS'
+--				or nam is null 																				then null
+--			else substring(nam, 1, 2)															
+--			end 																							as uf
+--		, trim(replace(replace(substring(nam, 3, 100), ' LT', ''), 'VIRTUAL', ''))							as nam_polo
+--		, last_day(min(polo.dat_init::date))																as dat_init --> mesma forma aplicada pelo time do polo
+	from 
+		dax_share_dax.tbl_vl_extc_polo polo
+	join
+		planejamentocomercial_work.msantos34_ddclientesativos
+		using( idt_safepay_user )
+	where 1=1
+		and polo.polo_empresas in (0,2,3) --> filtra apenas polo excluindo empresas
+--			and polo.des_origin ilike '%gerenciado%' -- retorna apenas clientes gerenciados	group by
+	group by all
+	;
+
+
+
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddclientes;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_ddclientes
+distkey(idt_safepay_user) as
+	select
+		  cli.dat_reference
+		, cli.idt_safepay_user
+		, port.des_portfolio
+		, case
+			when polo.idt_safepay_user is not null															then 'POLO'
+			else																							'NÃO POLO'
+			end																								as flg_polo
+		, cli.tpv
+		, cli.mo
+		, cli.rb
+		, cli.faixa_tpv
+		, cli.ordem_faixa
+	from 
+		planejamentocomercial_work.msantos34_ddclientesativos cli
+	left join
+		planejamentocomercial_work.msantos34_ddpolo polo
+		using( idt_safepay_user )
+	left join
+		dax_share_dax.ent_customer_portfolio_psp port
+		on cli.idt_safepay_user = port.idt_safepay_user
+		and port.flg_active = 'A'
+	group by all
+	;
+
+
+
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_dfprodutos;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.msantos34_dfprodutos
+distkey(idt_safepay_user) as 
+	select 
+		  vw.ano_mes																							as dat_reference
+		, port.idt_safepay_user
+		, port.des_portfolio
+		, case vw.cod_product
+			when 'FUNDS_ADDITION' 																			then '01. Adição de Fundos'
+			when 'CARD_ACCOUNT' 																			then '02. Cartão da Conta'
+			when 'CARD_CREDIT' 																				then '03. Cartão de Crédito'
+			when 'CARD_DEBIT' 																				then '04. Cartão de Débito'
+			when 'CARD_MULTIPLE' 																			then '05. Cartão Multiplo'
+			when 'CARD_PREPAID' 																			then '06. Cartão Pre-Pago'
+			when 'PAGINVEST_CDB' 																			then '07. CDB'
+			when 'PAYROLL_LOAN' 																			then '08. Consignado'
+			when 'INCOME_ACCOUNT_DIGITAL_ACCOUNT' 															then '09. FLOAT - Conta Digital'
+			when 'INCOME_ACCOUNT_PAGINVEST' 																then '10. FLOAT - Paginvest'
+			when 'PAGINVEST_FUNDOS_INVESTIMENTO' 															then '11. Fundo de Investimento'
+			when 'LOAN' 																					then '12. K-Giro'
+			when 'BILL_PAYMENT_CARD' 																		then '13. Pgto de Contas - Cartão'
+			when 'BILL_PAYMENT_BALANCE' 																	then '14. Pgto de Contas - Saldo'
+			when 'PIX_ENVIADO' 																				then '15. Pix Enviado'
+			when 'PIX_INSTALLMENTS' 																		then '16. Pix Parcelado'
+			when 'PIX_RECEBIDO' 																			then '17. Pix Recebido'
+			when 'PHONE_RECHARGE' 																			then '18. Recarga de Celular'
+			when 'SERVICES_RECHARGE' 																		then '19. Recarga de Serviços'
+			when 'INSURANCE_BUSINESS' 																		then '20. Seguro'
+			when 'INSURANCE_CARD_ACCOUNT'			 														then '20. Seguro'
+			when 'INSURANCE_CELLPHONE' 																		then '20. Seguro'
+			when 'INSURANCE_HEALTH' 																		then '20. Seguro'
+			when 'INSURANCE_PERSONAL' 																		then '20. Seguro'
+			when 'INSURANCE_PIX' 																			then '20. Seguro'
+			when 'INSURANCE_RESIDENTIAL' 																	then '20. Seguro'
+			when 'ADMINISTRATIVE_FEE' 																		then '21. Tarifa Administrativa'
+			when 'TED' 																						then '22. TED'
+			when 'PAGINVEST_TESOURO_DIRETO' 																then '23. Tesouro Direto'
+			end																								as produto
+		, port.flg_polo
+		, port.tpv
+		, port.mo
+		, port.rb
+		, port.faixa_tpv
+		, port.ordem_faixa
+		, trunc( vw.tpv, 2 )																				as tpv_vw
+		, trunc( vw.mo, 2 )																					as mo_vw
+		, trunc( vw.receita_bruta, 2 )																		as rb_vw
+		, trunc( vw.auc, 2 )																				as auc_vw
+		, trunc( vw.tpn )																					as tpn_vw
+		, trunc( vw.imposto )																				as imposto_vw
+		, trunc( vw.custos ) 																				as custos_vw
+		, trunc( vw.pdd ) 																					as pdd_vw
+		, trunc( vw.mc ) 																					as mc_vw
+		, trunc( vw.custo_financeiro ) 																		as custo_financeiro_vw
+	from
+		dax_share_dax.visao_geral_receitas vw
+	join
+		planejamentocomercial_work.msantos34_ddclientes port
+--		using( idt_safepay_user )
+		on vw.idt_safepay_user = port.idt_safepay_user
+		and vw.ano_mes = port.dat_reference
+	where 1=1
+--		and vw.ano_mes = ${var_periodo_inicio}
+		and (vw.ano_mes >= ${var_periodo_inicio} and vw.ano_mes <= ${var_periodo_fim} )
+	order by 
+		port.idt_safepay_user, vw.cod_product, vw.ano_mes
+	;
+
+
+
+drop table if exists #DS1;
+	select 
+		  cli.dat_reference
+	--	, cli.idt_safepay_user 
+		, cli.des_portfolio
+		, cli.flg_polo 
+		, prod.produto
+		, cli.faixa_tpv
+		, trunc( sum( cli.tpv ), 2 )														as tpv
+		, trunc( sum( cli.mo ), 2 )															as mo
+		, trunc( sum( cli.rb ), 2 )															as rb
+		, count( distinct  cli.idt_safepay_user )											as count_ids
+		, trunc( sum( prod.tpv_vw ), 2 )													as tpv_prod
+		, trunc( sum( prod.mo_vw ), 2 ) 													as mo_prod
+		, trunc( sum( prod.rb_vw ), 2 )														as rb_prod
+		, trunc( sum( prod.auc_vw ), 2 )													as auc_prod
+		, count( distinct  prod.idt_safepay_user )											as count_ids_prod
+		, trunc( sum( prod.tpn_vw ) )														as tpn_prod
+		, trunc( sum( prod.imposto_vw ) )													as imposto_prod
+		, trunc( sum( prod.custos_vw ) ) 													as custos_prod
+		, trunc( sum( prod.pdd_vw ) )														as pdd_prod
+		, trunc( sum( prod.mc_vw ) )														as mc_prod
+		, trunc( sum( prod.custo_financeiro_vw ) )											as custo_financeiro_prod
+	into
+		#DS1
+	from 
+		planejamentocomercial_work.msantos34_ddclientes cli
+	left join
+		planejamentocomercial_work.msantos34_dfprodutos prod
+--		using( idt_safepay_user )
+		on cli.idt_safepay_user = prod.idt_safepay_user
+		and cli.dat_reference = prod.ano_mes
+--	where 1=1
+	--	and idt_safepay_user = 919
+	group by all
+--	order by
+--		des_portfolio, flg_polo, produto, faixa_tpv, cli.dat_reference
+	;
+
+
+
+drop table if exists #DSFULL;
+	select 
+		  dat_reference
+	--	, idt_safepay_user
+		, des_portfolio
+		, flg_polo
+		, coalesce( produto, '24. Sem Produto' )::text										as produto
+		, faixa_tpv
+		, tpv
+		, mo
+		, rb
+		, count_ids
+		, tpv_prod
+		, mo_prod
+		, rb_prod
+		, auc_prod
+		, count_ids_prod
+		, tpn_prod
+		, imposto_prod
+		, custos_prod
+		, pdd_prod
+		, mc_prod
+		, custo_financeiro_prod
+	into
+		#DSFULL
+	from
+		#DS1
+		
+	union all
+	
+	select 
+		  cli.dat_reference
+	--	, cli.idt_safepay_user 
+		, cli.des_portfolio
+		, cli.flg_polo 
+		, '00. Adquirência'::text															as produto
+		, cli.faixa_tpv
+		, trunc( sum( cli.tpv ), 2 )														as tpv
+		, trunc( sum( cli.mo ), 2 )															as mo
+		, trunc( sum( cli.rb ), 2 )															as rb
+		, count( distinct  cli.idt_safepay_user )											as count_ids
+		, null::decimal(18,2) 																as tpv_prod
+		, null::decimal(18,2) 																as mo_prod
+		, null::decimal(18,2) 																as rb_prod
+		, null::decimal(18,2) 																as auc_prod
+		, null::decimal(18,2) 																as count_ids_prod
+		, null::decimal(18,2) 																as tpn_prod
+		, null::decimal(18,2) 																as imposto_prod
+		, null::decimal(18,2) 																as custos_prod
+		, null::decimal(18,2) 																as pdd_prod
+		, null::decimal(18,2) 																as mc_prod
+		, null::decimal(18,2) 																as custo_financeiro_prod
+	from
+		planejamentocomercial_work.msantos34_ddclientes cli
+--	where 1=1
+	--	and idt_safepay_user = 919
+	group by all
+--	order by
+--		des_portfolio, flg_polo, produto, faixa_tpv, dat_reference
+	;	
+
+
+
+select 
+	  dat_reference
+	, des_portfolio
+	, flg_polo
+	, produto
+	, case
+		when produto ilike '%Adquirência%'													then 'Adquirência'::varchar
+		when produto ilike '%Cartão %'														then 'Cartões'::varchar
+--		when produto ilike '%CDB'															then 'CDB'::varchar
+		when produto ilike '%K-giro'														then 'K-giro'::varchar
+		when produto ilike '%Pgto%'															then 'Pagamentos'::varchar
+		when produto ilike '%Recarga%'														then 'Recargas'::varchar
+		when produto ilike '%Seguro%'														then 'Seguro'::varchar
+		when produto ilike '%FLOAT%'														then 'FLOAT'::varchar
+		when produto ilike '%Consignado%'													then 'Consignado'::varchar
+		when produto ilike '%CDB%'	
+			or produto ilike 'Fundo de Investimento'										then 'Investimentos'::varchar
+		else produto
+		end																					as produto_agrupado
+	, faixa_tpv
+	, tpv
+	, mo
+	, rb
+	, count_ids
+	, tpv_prod
+	, mo_prod
+	, rb_prod
+	, auc_prod
+	, count_ids_prod
+	, tpn_prod
+	, imposto_prod
+	, custos_prod
+	, pdd_prod
+	, mc_prod
+	, custo_financeiro_prod
+	, produto_agrupado
+	, convert_timezone('UTC', 'America/Sao_Paulo', getdate())								as dat_creation_table
+from
+	#DSFULL
+--where 1=1
+--	and produto in ( '00. Adquirência', '24. Sem Produto' )
+order by
+	des_portfolio, flg_polo, faixa_tpv, produto, dat_reference
