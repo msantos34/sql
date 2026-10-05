@@ -13,8 +13,8 @@
 2.0.0
 19-08-2026
 		- Refatoracao consulta para melhoria de performance e correcao da fonte de hierarquia foto
-		  dos executivos.
-
+		  dos executivos
+ 
 		Foi identificado que na tabela da hierarquia foto, quando um executivo e desligado, o mes em
 		que ele foi desligado a produtividade dele nao e capturada pois na tabela
 		<tbl_vl_extc_polo_fechamento> a linha do mes que ele saiu fica com TBA, ou seja, sendo
@@ -33,33 +33,11 @@
 
 
 --////>>>>>>>>>>>>>>> PROCESSO DDHIERARQUIA
-drop table if exists #DDHIERARQUIA;
-create table #DDHIERARQUIA
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDFILME;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDFILME
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, dt_reference)
-as
-	--//// DDHIERARQUIA FOTO
-	select
-		  date_trunc( 'month', data_fechamento )::date											as dt_reference
-		, idt_safepay_user
-		, cod_cart::bigint
-		, initcap(nam_executive)																as executivo
-		, lower(nam_current_executive)															as login
-		, cod_matricula_exe::bigint
-		, date_trunc('month', peop.data_de_entrada)::date										as month_in
-		, date_trunc('month', peop.data_de_desligamento)::date									as month_out
-		, 'FOTO'::varchar(10)																	as origem
-	from
-		dax_share_dax.tbl_vl_extc_polo_fechamento ft
-	left join 
-		dax_share_dax_tools.vw_people_status peop
-		on peop.codigo_empregado = ft.cod_matricula_exe
-	where 1=1
-		and data_fechamento >= '2025-01-01'
-	group by all
-	
-	union all
-	
+as	
 	--//// DDHIERARQUIA FILME
 	select
 		  date_trunc( 'month', current_date-1 )::date											as dt_reference  --> existem casos onde o cliente aparece em mais de um mes. Como a tabela contempla dados filme deixei o current_date para considerar apenas o mes atual
@@ -77,16 +55,81 @@ as
 		dax_share_dax_tools.vw_people_status peop
 		on peop.codigo_empregado = filme.cod_matricula_exe
 	where polo_empresas in (0, 2, 3)
+--		and dat_start::date >= '2025-01-01' -- filtro usado nos relatorios de safra do time de polos
 	group by all
 	;
 
 
 
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDFOTO;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDFOTO
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, dt_reference)
+as
+	--//// DDHIERARQUIA FOTO
+	select
+		  date_trunc( 'month', ft.data_fechamento )::date										as dt_reference
+		, ft.idt_safepay_user
+		, ft.cod_cart::bigint
+		, initcap(ft.nam_executive)																as executivo
+		, lower(ft.nam_current_executive)														as login
+		, ft.cod_matricula_exe::bigint
+		, date_trunc('month', peop.data_de_entrada)::date										as month_in
+		, date_trunc('month', peop.data_de_desligamento)::date									as month_out
+		, 'FOTO'::varchar(10)																	as origem
+	from
+		dax_share_dax.tbl_vl_extc_polo_fechamento ft
+--	join
+--		planejamentocomercial_sandbox.planejamentocomercial_work.DDFILME
+--		using( idt_safepay_user ) --> garante que serão considerados apenas clientes cujo a dat_start é posterior a '2025-01-01' conforme regra usada nos relatórios de Polo.
+	left join 
+		dax_share_dax_tools.vw_people_status peop
+		on peop.codigo_empregado = ft.cod_matricula_exe
+	where 1=1
+		and ft.data_fechamento >= '2025-01-01'
+	group by all
+	;
+
+
+
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDHIERARQUIA;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDHIERARQUIA
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, dt_reference)
+as
+	select
+		  dt_reference
+		, idt_safepay_user
+		, cod_cart
+		, executivo
+		, login
+		, cod_matricula_exe
+		, month_in
+		, month_out
+		, origem
+	from
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDFOTO
+	union all
+	select
+		  dt_reference
+		, idt_safepay_user
+		, cod_cart
+		, executivo
+		, login
+		, cod_matricula_exe
+		, month_in
+		, month_out
+		, origem
+	from
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDFILME
+	;
+
+
 --////>>>>>>>>>>>>>>> PROCESSO TRATA OS CASOS DE TBA
 --//// ATRIBUI OS DADOS DA LINHA DO EXECUTIVO DE SAIDA PARA A LINHA DO TBA, SE <dt_reference> DO TBA = <month_out> DO EXECUTIVO DA LINHA ANTERIOR, CAPTURA OS DADOS DO EXECUTIVO QUE SAIU NO DECORRER DO MÊS
 --//// E OS DADOS DO EXECUTIVO QUE ENTROU, SE <dt_reference> DO TBA = <month_in> DO EXECUTIVO DA LINHA SEGUINTE CAPTURA OS DADOS DA LINHA DO EXECUTIVO DE ENTADA
-drop table if exists #DDHIER_TREATED;
-create table #DDHIER_TREATED
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDHIER_TREATED;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDHIER_TREATED
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, dt_reference)
 as
@@ -105,7 +148,7 @@ with
 				when upper(executivo) like '%TBA%' then 1 else 0 
 				end 																			as flg_tba
 		from
-			#DDHIERARQUIA
+			planejamentocomercial_sandbox.planejamentocomercial_work.DDHIERARQUIA
 		group by all
 	)
 	, REDIR as (
@@ -158,15 +201,221 @@ with
 	qualify 
 		row_number() over (partition by r.dt_reference, h.cod_cart, h.idt_safepay_user
 								order by h.flg_tba) = 1 --> exclui duplicidades de linhas que foram tratadas do TBA. Não retorna 1 cliente com um TBA e um executivo no mesmo mês.
-	order by dt_reference
+--	order by dt_reference
 	;
+
+
+
+--//// CLASSIFICACAO DO CREDENCIAMENTO
+--////////////////////////////////////////////////////////////////////////////////////////////////////
+--// REGRA POLO
+--//	INCREMENTO  → teve TPV no mês imediatamente anterior ao dat_start (credenciamento)
+--//	NOVO        → nunca transacionou antes do mes de credenciamento
+--//	REATIVAÇÃO  → demais casos ( ja transacionou antes , mas nao necessariamente no mes anterior )
+--////////////////////////////////////////////////////////////////////////////////////////////////////
+--//// CREDENCIAMENTOS DO POLO
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, dat_start)
+as
+	select
+		  idt_safepay_user
+		, dat_start::date																		as dat_start
+		, last_day(dat_start::date)																as month_credenciamento
+		, sum(case when last_day(dat_start::date) = dat_reference_values then num_tpv_value else 0 end) as num_tpv
+		, cast(0 as decimal(10,2)) 																as tpv_m_menos_1
+		, cast(null as date) 																	as first_tpv_date
+		, null::varchar(100)																	as tipo_credenciamento
+		, legado_novo
+	from
+		dax_share_dax.tbl_vl_extc_polo
+	where 
+		polo_empresas in (0, 2, 3)
+		and dat_start::date >= '2025-01-01' --> filtro usado nos relatorios de safra e matriz do time de polos. mantive para que os numeros estejam em conformidade com o deles, ainda que existam clientes com marcações anterirores a essa e com negociações nos últimos 13 meses.
+	group by all
+	;
+
+
+
+--//// HISTORICO MENSAL TPV
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.TPV;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.TPV
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, dat_reference)
+as
+	select 
+		  marg.idt_safepay_creditor																	as idt_safepay_user
+		, last_day( marg.dat_reference ) 															as dat_reference
+		, sum( marg.num_tpv_value ) 																as num_tpv
+	from 
+		dax_share_dax.ent_margin_summary marg
+	where exists(
+			select 1
+			from
+				planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO cli
+			where marg.idt_safepay_creditor = cli.idt_safepay_user
+			)
+	group by 1, 2
+	;
+
+
+
+--//// Primeiro mês com TPV da vida do cliente
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.TPV_FIRST;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.TPV_FIRST
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, first_tpv_date)
+as
+		select
+		      idt_safepay_user
+		    , min(dat_reference) 																	as first_tpv_date
+		from 
+			planejamentocomercial_sandbox.planejamentocomercial_work.TPV
+		where 
+			num_tpv > 0
+		group by 1
+	;
+
+
+
+--//// Marcando a primeira transação
+update 
+	planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO 
+set 
+	first_tpv_date = xx.first_tpv_date
+from 
+	planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO t1 
+inner join 
+	planejamentocomercial_sandbox.planejamentocomercial_work.TPV_FIRST xx 
+	on xx.idt_safepay_user = t1.idt_safepay_user
+;
+
+
+
+--//// Marca se teve TPV no mês anterior ao credenciamento
+	update 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO 
+	set 
+		tpv_m_menos_1 = xx.num_tpv
+	from 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO t1
+	inner join 
+		planejamentocomercial_sandbox.planejamentocomercial_work.TPV xx 
+		on xx.idt_safepay_user = t1.idt_safepay_user 
+		and xx.dat_reference = last_day(dateadd(month, -1, t1.dat_start))
+	;
+
+
+
+--//// INCREMENTO
+	update 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO
+	set 
+		tipo_credenciamento = 'INCREMENTO'
+	from 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO t1
+	inner join 
+		planejamentocomercial_sandbox.planejamentocomercial_work.TPV t 
+		on t.idt_safepay_user = t1.idt_safepay_user 						/* ids iguais entre bases */
+		and t.dat_reference = last_day(dateadd(month, -1, t1.dat_start)) 	/* a data do tpv é igual ao mês anterior ao credenciamento */
+		and t.num_tpv > 0 													/* o tpv do mês anterior é maior que zero */
+	where 
+		t1.num_tpv > 0
+	;
+
+
+
+--//// NOVO
+--//// Credenciado no mês atual
+--//// e primeiro TPV no mês do credenciamento ou nunca transacionou
+	update 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO
+	set 
+		tipo_credenciamento = 'NOVO'
+	where 
+		tipo_credenciamento is null
+		  and not exists (
+			  select 1
+			  from planejamentocomercial_sandbox.planejamentocomercial_work.TPV
+			  where planejamentocomercial_sandbox.planejamentocomercial_work.TPV.idt_safepay_user = planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO.idt_safepay_user
+				and planejamentocomercial_sandbox.planejamentocomercial_work.TPV.dat_reference < planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO.month_credenciamento
+		  )
+	;
+
+
+
+--////CLIENTES QUE AINDA NÃO TRANSACIONARAM SÃO MARCADOS COMO NOVO
+	update 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO 
+	set 
+		tipo_credenciamento = 'NOVO' 
+	where 
+		tipo_credenciamento is null 
+		and num_tpv = 0 
+		and first_tpv_date is null
+	; 
+ 
+
+
+--//// REATIVAÇÃO
+	update 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO
+	set 
+		tipo_credenciamento = 'REATIVAÇÃO'
+	where 
+		tipo_credenciamento is null
+	;
+
+
+
+--//// MARCACAO NOVA REGRA - CLIENTES COM ATINGIMENTO 6K
+	update 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO 
+	set 
+		tipo_credenciamento = 'NOVO - 6K'
+	from 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO t1 
+	where 1=1
+		and t1.legado_novo = 'M0' --> confirmado com o Wesley, clientes com essa marcacao ja tem o atingimento de 6k no TPV a partir de set/2026
+		and t1.tipo_credenciamento = 'NOVO'
+		and t1.month_credenciamento >= '2026-09-01'
+	;
+
+
+
+--//// TABELA CREDENCIAMENTO AJUSTADA
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO_tmp;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO_tmp
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user, dat_start)
+as
+	select
+		  a.idt_safepay_user
+		, a.dat_start
+		, a.month_credenciamento
+		, sum( a.num_tpv )										as num_tpv
+		, max( a.tpv_m_menos_1 )								as tpv_m_menos_1
+		, min( a.first_tpv_date )								as first_tpv_date
+		, max( a.tipo_credenciamento )							as tipo_credenciamento
+	from
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO a
+	group by all
+	;
+
+
+drop table planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO;
+	alter table planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO_tmp
+	rename to DDCREDENCIAMENTO
+	;
+
 
 
 --////>>>>>>>>>>>>>>> DIMENSOES DE ELEGIBILIDADE
 --//PROCESSO ATUA APENAS PARA OTIMIZAR O FILTRO REALIZADO NA BASE DE LINKS 
 --//// DDEXEC_MES - LOGINS ELEGIVEIS POR MES
-drop table if exists #DDEXEC_MES;
-create table #DDEXEC_MES
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDEXEC_MES;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDEXEC_MES
 diststyle all
 sortkey(dt_reference, login)
 as
@@ -174,7 +423,7 @@ as
 		  dt_reference
 		, login
 	from
-		#DDHIER_TREATED
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDHIER_TREATED
 	where
 		login is not null
 	group by all
@@ -183,8 +432,8 @@ as
 
 
 --//// DDCLI_MES - CLIENTES ELEGIVEIS POR MES
-drop table if exists #DDCLI_MES;
-create table #DDCLI_MES
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDCLI_MES;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDCLI_MES
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, dt_reference)
 as
@@ -192,14 +441,12 @@ as
 		  dt_reference
 		, idt_safepay_user
 	from
-		#DDHIER_TREATED
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDHIER_TREATED
 	group by all
 	;
 
 
-
 --////>>>>>>>>>>>>>>> PROCESSO CAPTURA E TRATAMENTO BASE DE LINKS APLICADOS
---//####################################################################################
 --//DFPROMOTION_RAW - Devido a atribuicao do link a quem alterou e a quem gerou, foi
 --//				  necessario realizarmos um tratamento para garantir que seja considerado
 --//				  o executivo correto.
@@ -208,9 +455,9 @@ as
 --//				  uma linha de remocao de um link e uma linha de atribuicao. Como esses eventos
 --//				  podem ocorrer em periodos diferentes, o lag particiona apenas por cliente,
 --//				  para enxergar toda a linha do tempo dele.
---//####################################################################################
-drop table if exists #DFPROMOTION_RAW;
-create table #DFPROMOTION_RAW
+--////////////////////////////////////////////////////////////////////////////////////////////////////////
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DFPROMOTION_RAW;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DFPROMOTION_RAW
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, dat_start, dat_end)
 as
@@ -239,20 +486,22 @@ as
 		exists (
 			select 1
 			from
-				#DDCLI_MES cli
+				planejamentocomercial_sandbox.planejamentocomercial_work.DDCLI_MES cli
 			where prom.idt_safepay_user = cli.idt_safepay_user --> garante que seja retornado apenas a base de clientes do polo
 		)
 	;
 
 
 
-drop table if exists #TPV_GOAL;
-create table #TPV_GOAL
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.TPV_GOAL;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.TPV_GOAL
 diststyle all 
 as
 	select
 		  nam_promotion
 		, num_tpv_goal
+		, ( num_tpv_goal * 0.30 )																as floor_num_tpv_goal
+		, ( num_tpv_goal * 0.15 )																as floor_15_num_tpv_goal
 		, dat_update
 	from
 		dax_share_forca_vendas.promotion_report_outbox
@@ -264,9 +513,9 @@ as
 	
 				
 
---//// #DFPROMOTION_TREATED RETORNA USUARIO CORRETO DA ATRIBUICAO DO LINK
-drop table if exists #DFPROMOTION_TREATED;
-create table #DFPROMOTION_TREATED
+--//// planejamentocomercial_sandbox.planejamentocomercial_work.DFPROMOTION_TREATED RETORNA USUARIO CORRETO DA ATRIBUICAO DO LINK
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DFPROMOTION_TREATED;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DFPROMOTION_TREATED
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, month_reference)
 as
@@ -284,7 +533,8 @@ as
 			then dateadd( day, -1, a.dat_end ) --> dateadd adicionado para que no dia da alteração, prevaleça a aplicação que foi alterada. Isso porque no join do processo que captura TPV o TPV viria duplicado para ambas as linhas, repetiria na fim da aplicação inativada e na inicio da nova aplicação
 			else a.dat_end
 			end 																					as dat_end_treated
-		, goal.num_tpv_goal
+		, goal.floor_num_tpv_goal
+		, goal.floor_15_num_tpv_goal
 	from(
 		select
 			  idt_safepay_user
@@ -308,19 +558,19 @@ as
 				end 																				as flg_link_origem --> confere se o link aplicado pelo sistema é o mesmo que o link aplicado pelo executivo
 			, ( flg_sys + flg_link_origem )															as flg_true --> diz se ambos os casos que devem ser checados dizem respeito a linha que precisa reapontar o carimbo de <dat_end>
 		from
-			#DFPROMOTION_RAW prom
+			planejamentocomercial_sandbox.planejamentocomercial_work.DFPROMOTION_RAW prom
 --		where idt_safepay_user = 8816 --36158403 -- 108259041 -- 36158403 --3855639
 	) a
 	left join
-		#TPV_GOAL as goal
+		planejamentocomercial_sandbox.planejamentocomercial_work.TPV_GOAL as goal
 		using( nam_promotion )
 	;
 
 
 
 --////>>>>>>>>>>>>>>> ELEGIBILIDADE E RANQUEAMENTOS
-drop table if exists #DFELEGIVEL;
-create table #DFELEGIVEL
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DFELEGIVEL;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DFELEGIVEL
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, month_reference, dat_start)
 as
@@ -335,23 +585,29 @@ with
 			, prom.dat_load
 			, prom.idt_mobi_promotion
 			, prom.nam_promotion
-			, prom.num_tpv_goal
+			, prom.floor_num_tpv_goal
+			, prom.floor_15_num_tpv_goal
+			, case
+				when idt_mobi_promotion = 1
+					and row_number() over( partition by prom.idt_safepay_user order by prom.dat_start, coalesce( prom.dat_end_treated, current_date ) ) = 1 then 1
+				else 0
+				end																					as flg_default
 			, prom.lag_agent
 			, last_day( add_months( prom.dat_start::date, 3 ) )										as last_month_reference
 		from
-			#DFPROMOTION_TREATED prom
+			planejamentocomercial_sandbox.planejamentocomercial_work.DFPROMOTION_TREATED prom
 		where 1=1
 			--//// e o link precisa ter sido aplicado para um cliente do polo naquele mes
 			and exists (
 				select 1
-				from #DDCLI_MES exe
+				from planejamentocomercial_sandbox.planejamentocomercial_work.DDCLI_MES exe
 				where exe.idt_safepay_user	= prom.idt_safepay_user
 				  and exe.dt_reference		= prom.month_reference
 			)
 			--//// e o link precisa ter sido aplicado por um executivo do polo naquele mes
 			and exists (
 				select 1
-				from #DDEXEC_MES exe
+				from planejamentocomercial_sandbox.planejamentocomercial_work.DDEXEC_MES exe
 				where exe.login				= prom.lag_agent
 				  and exe.dt_reference		= prom.month_reference
 			)
@@ -380,8 +636,8 @@ with
 --//// FLINKS_UNICOS DIMENSIONA CLIENTES POR MES
 --		A APLICACAO DO LINK PRECISA SER DE UM EXECUTIVO POLO E DE UM CLIENTE POLO, MAS NAO
 --		NECESSARIAMENTE QUE O CLIENTE SEJA DA CARTEIRA DAQUELE EXECUTIVO
-drop table if exists #FLINKS_UNICOS;
-create table #FLINKS_UNICOS
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.FLINKS_UNICOS;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.FLINKS_UNICOS
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, dat_link)
 as
@@ -390,7 +646,7 @@ as
 		, min( prom.month_reference ) over(partition by idt_safepay_user)							as dat_min
 		, prom.idt_safepay_user
 	from
-		#DFELEGIVEL prom
+		planejamentocomercial_sandbox.planejamentocomercial_work.DFELEGIVEL prom
 	group by
 		  prom.month_reference
 		, prom.idt_safepay_user
@@ -399,8 +655,8 @@ as
 
 
 --//// DDMESES DIMENSIONA OS MESES ANALISADOS
-drop table if exists #DDMESES;
-create table #DDMESES
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDMESES;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDMESES
 diststyle all
 sortkey(dat_date)
 as
@@ -416,8 +672,8 @@ as
 
 
 --//// DDGRADE_CLIENTES DIMENSIONA OS MESES POR CLIENTE
-drop table if exists #DDGRADE_CLIENTES;
-create table #DDGRADE_CLIENTES
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDGRADE_CLIENTES;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDGRADE_CLIENTES
 distkey(idt_safepay_user)
 sortkey(dat_date, idt_safepay_user)
 as
@@ -425,9 +681,9 @@ as
 		  dat.dat_date
 		, link.idt_safepay_user
 	from
-		#FLINKS_UNICOS link
+		planejamentocomercial_sandbox.planejamentocomercial_work.FLINKS_UNICOS link
 	cross join
-		#DDMESES dat
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDMESES dat
 	where 
 		dat.dat_date >= link.dat_min --> garante que retorne todos os meses a partir do primeiro mês de aplicacao do cliente
 	group by all
@@ -437,8 +693,8 @@ as
 
 --////>>>>>>>>>>>>>>> DFMARG_DIA - APENAS OS DIAS COM TPV
 --//// grao: cliente x dia. so entra dia que teve transacao
-drop table if exists #DFMARG_DIA;
-create table #DFMARG_DIA
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DFMARG_DIA;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DFMARG_DIA
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, day_reference)
 as
@@ -457,6 +713,16 @@ as
 				marg.num_gross_debit_slip +
 				marg.num_gross_cred_slip  
 			)																						as num_rb
+--		, sum(
+--				num net intermediation revenue +
+--				num net installment revenue +
+--				num net cred_slip +
+--				num_net debit_slip +
+--				num_net_anticipation_value +
+--				num_net fee_amount +
+--				coalesce(num_net_fee_amount_canc, 0) +
+--				num net fee financial institution)
+--			) 																						as num_net_take_rote
 	from
 		dax_share_dax.ent_contribution_margin_kpi_values_psp marg
 	where
@@ -464,7 +730,7 @@ as
 		and exists (
 			select 1
 			from
-				#DFELEGIVEL e
+				planejamentocomercial_sandbox.planejamentocomercial_work.DFELEGIVEL e
 			where
 				e.idt_safepay_user		= marg.idt_safepay_creditor
 				and e.ordem_dia_aplic	= 1
@@ -477,8 +743,8 @@ as
 
 --////>>>>>>>>>>>>>>> DFMARG_MES - UMA LINHA POR CLIENTE/MES
 --//// grao: cliente x mes. a DDGRADE_CLIENTES garante a linha mesmo no mes sem transacao.
-drop table if exists #DFMARG_MES;
-create table #DFMARG_MES
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DFMARG_MES;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DFMARG_MES
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, month_margin)
 as
@@ -492,21 +758,32 @@ as
 		, coalesce( sum(dia.num_rb), 0 )															as num_rb
 		, min( case when dia.day_reference is null then 1 else 0 end )								as flg_mes_sem_tpv
 	from
-		#DDGRADE_CLIENTES g
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDGRADE_CLIENTES g
 	left join
-		#DFMARG_DIA dia
+		planejamentocomercial_sandbox.planejamentocomercial_work.DFMARG_DIA dia
 		on  g.idt_safepay_user	= dia.idt_safepay_user
 		and g.dat_date			= dia.month_margin
 	where exists (
 			select 1
 			from
-				#DFELEGIVEL e
+				planejamentocomercial_sandbox.planejamentocomercial_work.DFELEGIVEL e
 			where
 				e.idt_safepay_user		= g.idt_safepay_user
 				and e.ordem_mes_aplic	= 1
 				and g.dat_date between e.month_reference and e.last_month_reference
 		)
 	group by all
+	;
+
+
+
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDDT_MAX;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDDT_MAX
+as
+	select
+		  max( prom.dat_start )																	as dat_start_max
+	from
+		planejamentocomercial_sandbox.planejamentocomercial_work.DFELEGIVEL prom
 	;
 
 
@@ -525,8 +802,8 @@ as
  * <flg_dia> dias em que o link esteve aplicado. <tip_grao> o substitui
  * 
 */
-drop table if exists #DATASET;
-create table #DATASET
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DATASET;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DATASET
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, month_reference)
 as
@@ -548,7 +825,9 @@ as
 		, prom.lag_agent
 		, prom.idt_mobi_promotion
 		, prom.nam_promotion
-		, prom.num_tpv_goal
+		, prom.floor_num_tpv_goal
+		, prom.floor_15_num_tpv_goal
+		, prom.flg_default
 		, prom.ordem_dia_aplic
 		, prom.ordem_mes_aplic
 		, prom.chave_aplicacao
@@ -559,9 +838,9 @@ as
 		, trunc(sum(periodo.num_rb), 2)																as num_rb
 		, sum(periodo.qty_transaction)::integer														as qty_transaction
 	from
-		#DFELEGIVEL prom
+		planejamentocomercial_sandbox.planejamentocomercial_work.DFELEGIVEL prom
 	inner join
-		#DFMARG_DIA periodo
+		planejamentocomercial_sandbox.planejamentocomercial_work.DFMARG_DIA periodo
 		on  prom.idt_safepay_user	= periodo.idt_safepay_user
 		and prom.ordem_dia_aplic	= 1 --> atribui apenas para as linhas do ultimo link aplicado no dia
 		and periodo.day_reference between prom.dat_start::date
@@ -589,7 +868,9 @@ as
 		, prom.lag_agent
 		, prom.idt_mobi_promotion
 		, prom.nam_promotion
-		, prom.num_tpv_goal
+		, prom.floor_num_tpv_goal
+		, prom.floor_15_num_tpv_goal
+		, prom.flg_default
 		, prom.ordem_dia_aplic
 		, prom.ordem_mes_aplic
 		, prom.chave_aplicacao
@@ -600,9 +881,9 @@ as
 		, trunc(sum(mes.num_rb), 2)																	as num_rb
 		, sum(mes.qty_transaction)::integer															as qty_transaction
 	from
-		#DFELEGIVEL prom
+		planejamentocomercial_sandbox.planejamentocomercial_work.DFELEGIVEL prom
 	left join
-		#DFMARG_MES mes
+		planejamentocomercial_sandbox.planejamentocomercial_work.DFMARG_MES mes
 		on  prom.idt_safepay_user	= mes.idt_safepay_user
 --		and prom.ordem_mes_aplic	= 1
 		and mes.month_margin between dateadd(month, 1, prom.month_reference) --> garante retornar apenas meses entre M1 e M3. M0 se mantem na branch 3
@@ -611,8 +892,7 @@ as
 	group by all
 	
 	union all
-	
-	--//// ---------- 3. GRAO DIA M0 + REGISTRO DE APLICAÇÕES ----------
+--	//// ---------- 3. GRAO DIA M0 + REGISTRO DE APLICAÇÕES ----------
 	select
 		  3																							as tip_grao
 		, 1																							as flg_dia
@@ -637,7 +917,9 @@ as
 		, prom.lag_agent
 		, prom.idt_mobi_promotion
 		, prom.nam_promotion
-		, prom.num_tpv_goal
+		, prom.floor_num_tpv_goal
+		, prom.floor_15_num_tpv_goal
+		, prom.flg_default
 		, prom.ordem_dia_aplic
 		, prom.ordem_mes_aplic
 		, prom.chave_aplicacao
@@ -650,9 +932,9 @@ as
 		, trunc(coalesce(sum(dia.num_rb), 0), 2)													as num_rb
 		, coalesce(sum(dia.qty_transaction), 0)::integer											as qty_transaction
 	from
-		#DFELEGIVEL prom
+		planejamentocomercial_sandbox.planejamentocomercial_work.DFELEGIVEL prom
 	left join
-		#DFMARG_DIA dia
+		planejamentocomercial_sandbox.planejamentocomercial_work.DFMARG_DIA dia
 		on  prom.idt_safepay_user	= dia.idt_safepay_user
 		and dia.month_margin 		= prom.month_reference
 		and prom.ordem_mes_aplic = 1
@@ -663,39 +945,51 @@ as
 
 
 
-drop table if exists #DF_FULL_DATASET;
-create table #DF_FULL_DATASET
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DF_FULL_DATASET;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DF_FULL_DATASET
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user, month_reference)
 as
 	select 
-		  dat_start::date
-		, dat_end::date
-		, month_reference
-		, day_reference
-		, month_margin
-		, idt_safepay_user
-		, idt_mobi_promotion
-		, trunc(sum(num_tpv), 2)																	as num_tpv
-		, trunc(sum(num_mo), 2)																		as num_mo
-		, trunc(sum(num_mc), 2)																		as num_mc
-		, trunc(sum(num_rb), 2)																		as num_rb
+		  dts.dat_start::date
+		, dts.dat_end::date
+		, dts.month_reference
+		, dts.day_reference
+		, dts.month_margin
+		, dts.idt_safepay_user
+		, dts.idt_mobi_promotion
+		, trunc(sum(dts.num_tpv), 2)																as num_tpv
+		, trunc(sum(dts.num_mo), 2)																	as num_mo
+		, trunc(sum(dts.num_mc), 2)																	as num_mc
+		, trunc(sum(dts.num_rb), 2)																	as num_rb
 		, sum(qty_transaction)																		as qty_transaction
-		, num_mes_safra	--> 0 = M0, 1 = M+1, 2 = M+2, 3 = M+3
-		, tip_grao --> 1 = DIA VIGENCIA, 2 = MES M1 A M3, 3 = DIA M0 + REGISTRO APLICACOES
-		, num_tpv_goal
-		, ( num_tpv_goal * 0.30 )																	as floor_num_tpv_goal
-		, flg_dia
-		, flg_aplic_ativa
-		, flg_atribui_tpv
-		, flg_mes_sem_tpv
-		, ordem_dia_aplic
-		, ordem_mes_aplic
-		, num_dia_mes																				as num_day_reference
+		, dts.num_mes_safra	--> 0 = M0, 1 = M+1, 2 = M+2, 3 = M+3
+		, dts.tip_grao --> 1 = DIA VIGENCIA, 2 = MES M1 A M3, 3 = DIA M0 + REGISTRO APLICACOES
+		, dts.floor_num_tpv_goal
+		, dts.floor_15_num_tpv_goal
+		, dts.flg_default
+		, dts.flg_dia
+		, dts.flg_aplic_ativa
+		, dts.flg_atribui_tpv
+		, dts.flg_mes_sem_tpv
+		, dts.ordem_dia_aplic
+		, dts.ordem_mes_aplic
+		, dts.num_dia_mes																			as num_day_reference
+--		, tipo_credenciamento																		as tip_credenciamento
+		, case 
+			when tipo_credenciamento = 'INCREMENTO'													then 1
+			when tipo_credenciamento = 'NOVO'														then 2
+			when tipo_credenciamento = 'NOVO - 6K' and month_reference < '2026-09-01'				then 2
+			when tipo_credenciamento = 'NOVO - 6K' and month_reference >= '2026-09-01'				then 3
+			when tipo_credenciamento = 'REATIVAÇÃO'													then 4
+			end 																					as tip_credenciamento
 		, chave_aplicacao
-		, to_char( month_reference, 'dd-mm-yyyy' ) || ' - ' || lag_agent      						as chave_user
+		, to_char( dts.month_reference, 'dd-mm-yyyy' ) || ' - ' || lag_agent      					as chave_user
 	from
-		#DATASET
+		planejamentocomercial_sandbox.planejamentocomercial_work.DATASET dts
+	left join 
+		planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO
+		using( idt_safepay_user )
 	group by all
 --	qualify
 --		count(1) over ( partition by idt_safepay_user, month_reference, month_margin, day_reference, idt_mobi_promotion, ordem_dia_aplic, num_tpv, num_mo ) > 1 --order by month_reference, month_margin
@@ -704,72 +998,73 @@ as
 	;
 
 
-select 
---	count(1)
-	  dat_start
---	, dat_end
-	, month_reference
-	, day_reference
-	, month_margin
-	, idt_safepay_user
-	, idt_mobi_promotion
-	, num_tpv
-	, num_mo
-	, num_mc
-	, num_rb
-	, qty_transaction
-	, num_mes_safra
-	, tip_grao --> 1 = DIA, 2 = MES, 3 = MES M0 diarizado para visão MTD
-	, num_tpv_goal
-	, floor_num_tpv_goal
---	, flg_dia
-	, flg_aplic_ativa
-	, flg_atribui_tpv
-	, flg_mes_sem_tpv
-	, ordem_dia_aplic
-	, ordem_mes_aplic
-	, num_day_reference
-	, chave_aplicacao
-	, chave_user
-from
-	#DF_FULL_DATASET
---where 1=1
---	and idt_safepay_user = 18062 --272398341 --198710
---	and ordem_dia_aplic = 3
---	and tip_grao = 1
-group by all
---order by
---	idt_safepay_user, ordem_dia_aplic desc , idt_mobi_promotion desc, dat_start, dat_end, day_reference
---	
 
 
+--select
+----	count(1)
+--	  dat_start
+----	, dat_end
+--	, month_reference
+--	, day_reference
+--	, month_margin
+--	, idt_safepay_user
+--	, idt_mobi_promotion
+--	, num_tpv
+--	, num_mo
+--	, num_mc
+--	, num_rb
+--	, qty_transaction
+--	, num_mes_safra
+--	, tip_grao --> 1 = DIA, 2 = MES, 3 = MES M0 diarizado para visão MTD
+--	, floor_num_tpv_goal
+--	, floor_15_num_tpv_goal
+--	, flg_default
+----	, flg_dia
+----	, flg_aplic_ativa
+--	, flg_atribui_tpv
+--	, flg_mes_sem_tpv
+--	, ordem_dia_aplic
+----	, ordem_mes_aplic
+----	, num_day_reference
+--	, tip_credenciamento
+--	, chave_aplicacao
+--	, chave_user
+--from
+--	planejamentocomercial_sandbox.planejamentocomercial_work.DF_FULL_DATASET
+----where 1=1
+--group by all
+----order by
+----	idt_safepay_user, ordem_dia_aplic desc , idt_mobi_promotion desc, dat_start, dat_end, day_reference
 	
+
+
 ----////>>>>>>>>>>>>>>> DATASET - RESULTADO FINAL VALIDACAO
 --	select 
 --		  month_reference
 --		, month_margin
+----		, tip_credenciamento
 ----		, idt_safepay_user
 --		, count(distinct agg.idt_safepay_user) 													as countdist
 --		, trunc(sum(agg.num_tpv), 2)															as tpv
 --		, trunc(sum(agg.num_mo), 2)																as mo
 --		, trunc(sum(agg.num_mc), 2)																as mc
-----		, trunc( ifnull( sum(agg.num_tpv), 0 ) / nullif( count(distinct agg.idt_safepay_user), 0 ), 2) as tpv_medio
-----		, trunc( ifnull( sum(agg.num_mo), 0 ) / nullif( count(distinct agg.idt_safepay_user), 0 ), 2) as mo_medio
-----		, trunc( ifnull( (sum(agg.num_mo), 0 ) / nullif( sum(agg.num_tpv), 0 ) )*100, 2)		as mo_perc
-----		, trunc( ifnull( (sum(agg.num_mc), 0 ) / nullif( sum(agg.num_tpv), 0 ) )*100, 2)		as mc_perc
+--	--		, trunc( ifnull( sum(agg.num_tpv), 0 ) / nullif( count(distinct agg.idt_safepay_user), 0 ), 2) as tpv_medio
+--	--		, trunc( ifnull( sum(agg.num_mo), 0 ) / nullif( count(distinct agg.idt_safepay_user), 0 ), 2) as mo_medio
+--	--		, trunc( ifnull( (sum(agg.num_mo), 0 ) / nullif( sum(agg.num_tpv), 0 ) )*100, 2)		as mo_perc
+--	--		, trunc( ifnull( (sum(agg.num_mc), 0 ) / nullif( sum(agg.num_tpv), 0 ) )*100, 2)		as mc_perc
 --	from
---	  #DF_FULL_DATASET agg
+--	  planejamentocomercial_sandbox.planejamentocomercial_work.DF_FULL_DATASET agg
 --	where 1=1
---		and month_reference >= '2026-01-01' 
-----		and flg_dia = 1
+--		and month_reference >= '2026-01-01'
+--	--		and flg_dia = 1
 --		and tip_grao = 3
 --		and num_mes_safra = 0
---		and num_day_reference <= 9 --extract( day from current_date - 1 )
-----		and idt_safepay_user = 1461556
-----		and num_tpv= 0
+----		and tip_credenciamento = 'NOVO - 6K'
+----			and tip_credenciamento  is null 
+--	--		and num_day_reference <= extract( day from current_date - 1 )
+--	--		and idt_safepay_user = 38025 -- 1461556
+--	--		and num_tpv= 0
 --	group by all 
---	order by  month_reference, month_margin
-----	order by idt_safepay_user, month_reference, month_margin
-
-
-  
+----	order by idt_safepay_user
+--	order by  month_reference, month_margin--, tip_credenciamento
+----	;
