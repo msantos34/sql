@@ -1,6 +1,6 @@
 /*
 
-	APLICACOES LINK POLO 3.0.0
+	APLICACOES LINK POLO 3.0.2
 
 	Derivacao das tabelas
 
@@ -12,7 +12,7 @@
 		01. DDPARAM					- datas de referencia da execucao (corte unico)
 		02. DDHIERARQUIA			- hierarquia FOTO + FILME deduplicada
 		03. DDHIER_TREATED			- tratamento dos TBAs
-		04. DDCREDENCIAMENTO		- classificacao do credenciamento (1 linha por cliente)
+		04. DDCRED_BASE / DDCREDENCIAMENTO - classificacao do credenciamento (1 linha por cliente)
 		05. DDEXEC_MES / DDCLI_MES	- elegibilidade por mes
 		06. DFPROMOTION_RAW			- log de links do cliente
 		07. TPV_GOAL				- metas de TPV por link
@@ -23,6 +23,16 @@
 		12. DFMARG_MES				- margem cliente x mes x parte do mes (flg_mtd)
 		13. DDDT_MAX				- datas de controle para o BI
 		14. DF_FULL_DATASET			- dataset final, sem abertura diaria
+
+3.0.2
+05-10-2026
+		- EXISTS trocados por JOIN na DFPROMOTION_RAW e na DFELEGIVEL (mesmo resultado: as tabelas
+		  do join ja sao distintas na chave usada)
+
+3.0.1
+05-10-2026
+		- DDCRED_BASE materializada e EXISTS trocado por JOIN no credenciamento
+		  (corrige erro de subquery correlacionada e evita ler a tbl_vl_extc_polo 3 vezes)
 
 3.0.0
 05-10-2026
@@ -225,28 +235,42 @@ with
 --//	REATIVAÇÃO  → demais casos ( ja transacionou antes , mas nao necessariamente no mes anterior )
 --//	NOVO - 6K	→ NOVO com legado_novo = 'M0' credenciado a partir de set/2026
 --////////////////////////////////////////////////////////////////////////////////////////////////////
---//// 3.0.0: mesma regra em 1 CTAS. Saem as tabelas TPV, TPV_FIRST, DDCREDENCIAMENTO_tmp e os UPDATEs
---//// (UPDATE no Redshift = delete + insert: gera linhas fantasmas e exige vacuum)
+--//// 3.0.1: BASE materializada em tabela (DDCRED_BASE) e EXISTS trocado por JOIN.
+--//// O EXISTS correlacionado contra a CTE agregada gerava erro no Redshift e a CTE era lida 3 vezes.
+
+--//// CREDENCIAMENTOS DO POLO
+drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDCRED_BASE;
+create table planejamentocomercial_sandbox.planejamentocomercial_work.DDCRED_BASE
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user)
+as
+	select
+		  idt_safepay_user
+		, dat_start::date																		as dat_start
+		, last_day( dat_start::date )															as month_credenciamento
+		, sum( case when last_day( dat_start::date ) = dat_reference_values then num_tpv_value else 0 end )	as num_tpv --> TPV no mes do credenciamento
+		, max( case when legado_novo = 'M0' then 1 else 0 end )								as flg_m0 --> confirmado com o Wesley: M0 ja tem atingimento de 6k no TPV a partir de set/2026
+	from
+		dax_share_dax.tbl_vl_extc_polo
+	where 
+		polo_empresas in (0, 2, 3)
+		and dat_start::date >= '2025-01-01' --> filtro usado nos relatorios de safra e matriz do time de polos
+	group by 1, 2, 3
+	;
+
+
+
 drop table if exists planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO;
 create table planejamentocomercial_sandbox.planejamentocomercial_work.DDCREDENCIAMENTO
 distkey(idt_safepay_user)
 sortkey(idt_safepay_user)
 as
 with
-	--//// CREDENCIAMENTOS DO POLO
-	BASE as (
-		select
-			  idt_safepay_user
-			, dat_start::date																		as dat_start
-			, last_day( dat_start::date )															as month_credenciamento
-			, sum( case when last_day( dat_start::date ) = dat_reference_values then num_tpv_value else 0 end )	as num_tpv --> TPV no mes do credenciamento
-			, max( case when legado_novo = 'M0' then 1 else 0 end )								as flg_m0 --> confirmado com o Wesley: M0 ja tem atingimento de 6k no TPV a partir de set/2026
+	CLI as (
+		select distinct
+			idt_safepay_user
 		from
-			dax_share_dax.tbl_vl_extc_polo
-		where 
-			polo_empresas in (0, 2, 3)
-			and dat_start::date >= '2025-01-01' --> filtro usado nos relatorios de safra e matriz do time de polos
-		group by 1, 2, 3
+			planejamentocomercial_sandbox.planejamentocomercial_work.DDCRED_BASE
 	)
 	--//// HISTORICO MENSAL TPV
 	, TPV_MES as (
@@ -256,11 +280,9 @@ with
 			, sum( marg.num_tpv_value )																as num_tpv
 		from 
 			dax_share_dax.ent_margin_summary marg
-		where exists(
-			select 1
-			from BASE cli
-			where cli.idt_safepay_user = marg.idt_safepay_creditor
-		)
+		join
+			CLI cli
+			on cli.idt_safepay_user = marg.idt_safepay_creditor --> join no lugar do EXISTS
 		group by 1, 2
 	)
 	--//// HISTORICO RELATIVO AO CREDENCIAMENTO
@@ -272,7 +294,7 @@ with
 			, max( case when t.dat_reference < b.month_credenciamento then 1 else 0 end )							as flg_hist_antes	--> tem historico antes do mes do credenciamento
 			, min( case when t.num_tpv > 0 then t.dat_reference end )												as first_tpv_date	--> primeiro mes com TPV da vida do cliente
 		from
-			BASE b
+			planejamentocomercial_sandbox.planejamentocomercial_work.DDCRED_BASE b
 		join
 			TPV_MES t
 			on t.idt_safepay_user = b.idt_safepay_user
@@ -300,7 +322,7 @@ with
 				else 'REATIVAÇÃO'
 			  end																					as tipo_credenciamento
 		from
-			BASE b
+			planejamentocomercial_sandbox.planejamentocomercial_work.DDCRED_BASE b
 		left join
 			HIST h
 			on  h.idt_safepay_user	= b.idt_safepay_user
@@ -384,17 +406,17 @@ as
 				)																					as lag_agent --> captura o agent da linha anterior considerando a ordem da dt inicio e data fim. Isso para retornar quem aplicou
 	from
 		dax_share_dax.ent_customer_promotion_psp prom
+	--//// apenas clientes da base do polo. o mes da aplicacao e validado na DFELEGIVEL
+	join (
+		select distinct
+			idt_safepay_user
+		from
+			planejamentocomercial_sandbox.planejamentocomercial_work.DDCLI_MES
+	) cli
+		on cli.idt_safepay_user = prom.idt_safepay_user
 	left join
 		dax_share_dax_mdm.mobi_promotion nam_pro
 		on prom.idt_mobi_promotion = nam_pro.idt_mobi_promotion --> nao filtro periodo para pegar todo o historico da linha do tempo das aplicacoes do cliente visto que manipulo as linhas.
-	where 
-		--//// apenas clientes da base do polo. o mes da aplicacao e validado na DFELEGIVEL
-		exists (
-			select 1
-			from
-				planejamentocomercial_sandbox.planejamentocomercial_work.DDCLI_MES cli
-			where prom.idt_safepay_user = cli.idt_safepay_user
-		)
 	;
 
 
@@ -502,23 +524,18 @@ with
 			, last_day( add_months( prom.dat_start::date, 3 ) )										as last_month_reference
 		from
 			planejamentocomercial_sandbox.planejamentocomercial_work.DFPROMOTION_TREATED prom
+		--//// o link precisa ter sido aplicado para um cliente do polo naquele mes
+		join
+			planejamentocomercial_sandbox.planejamentocomercial_work.DDCLI_MES cli --> ja e distinta por cliente x mes: o join nao duplica linhas
+			on  cli.idt_safepay_user	= prom.idt_safepay_user
+			and cli.dt_reference		= prom.month_reference
+		--//// e por um executivo do polo naquele mes
+		join
+			planejamentocomercial_sandbox.planejamentocomercial_work.DDEXEC_MES exe --> ja e distinta por login x mes: o join nao duplica linhas
+			on  exe.login				= prom.lag_agent
+			and exe.dt_reference		= prom.month_reference
 		cross join
 			planejamentocomercial_sandbox.planejamentocomercial_work.DDPARAM p
-		where 1=1
-			--//// o link precisa ter sido aplicado para um cliente do polo naquele mes
-			and exists (
-				select 1
-				from planejamentocomercial_sandbox.planejamentocomercial_work.DDCLI_MES cli
-				where cli.idt_safepay_user	= prom.idt_safepay_user
-				  and cli.dt_reference		= prom.month_reference
-			)
-			--//// e por um executivo do polo naquele mes
-			and exists (
-				select 1
-				from planejamentocomercial_sandbox.planejamentocomercial_work.DDEXEC_MES exe
-				where exe.login				= prom.lag_agent
-				  and exe.dt_reference		= prom.month_reference
-			)
 	)
 	, RANQUEADO as (
 		select
