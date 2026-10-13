@@ -1,0 +1,191 @@
+/* ============================================================================
+   extNomeParceiro.sql — agrupa IDTs por aproximação do nome e devolve um nome
+   único e estável por parceiro (Redshift).
+
+   Consulta única com CTEs: roda direto no Redshift e no Power BI (NativeQuery),
+   sem função, view ou tabela. Ajuste os pontos marcados com >>>.
+
+   Regras
+   1) Normaliza: acento, maiúsculas, apóstrofo, hífen e pontuação; tira do FIM
+      do nome sufixo societário (SA, S/A, S, LTDA, ME, EPP, EIRELI, MEI),
+      loja/filial/unidade/franquia/matriz e número de unidade; ignora espaços.
+        'Cacau Show S.A.' | 'CACAU SHOW - LTDA ME' | 'cacau show loja 12'
+        | 'CACAUSHOW'  ->  chave 'cacaushow'
+   2) Aproxima: cada grafia entra no grupo do prefixo mais curto, em palavras
+      inteiras (mínimo 2 palavras), que já existia quando ela foi cadastrada.
+        'Cacau Show - Shopping Morumbi'  ->  grupo 'Cacau Show'
+   3) Imutável: grupo e nome dependem só do cadastro, nada de TPV. Grafia nova
+      nunca muda o grupo nem o nome de quem já existe. Por isso a base é o
+      cadastro COMPLETO (inclusive inativos), sem filtro de mês.
+   4) Exceções: de-para manual dentro da própria query (versione no Git).
+
+   Para revisar os grupos, use as consultas de conferência no fim do arquivo.
+   ========================================================================== */
+WITH
+
+-- >>> BASE: cadastro completo, 1 linha por IDT, sem filtro de mês.
+--     Se der, restrinja ao universo de parceiros: reduz o risco de juntar
+--     nomes genéricos (ex.: 'auto posto ...').
+base AS (
+    SELECT idt_safepay_user,
+           nom_cliente  AS nm_original,       -- >>> coluna do nome
+           dat_cadastro AS dt_cadastro        -- >>> data de cadastro do IDT (ou o próprio ID, se sequencial)
+    FROM   schema.tabela_cadastro             -- >>> tabela de cadastro
+),
+
+-- EXCEÇÕES (1 linha por chave): chave_ns = coluna de mesmo nome na saída.
+-- Juntam erro de digitação, separam grupo indevido ou corrigem a exibição.
+-- Usando a chave de um grupo (chave_grupo), vale para o grupo todo.
+excecoes AS (
+              SELECT CAST('-' AS VARCHAR(200)) AS chave_ns,       -- linha neutra
+                     CAST('-' AS VARCHAR(200)) AS nm_oficial
+    -- UNION ALL SELECT 'cacausho',    'Cacau Show'               -- erro de digitação
+    -- UNION ALL SELECT 'paodeacucar', 'Pão de Açúcar'            -- exibição com acento
+),
+
+-- 1) NORMALIZAÇÃO (uma vez por nome distinto)
+nomes AS (
+    SELECT nm_original,
+           NULLIF(TRIM(REGEXP_REPLACE(n1,
+               '( (s a|sa|s|ltda|limitada|me|epp|eireli|mei|loja|lj|filial|unidade|franquia|matriz|[0-9]+))+$',
+               '')), '') AS chave
+    FROM  (SELECT nm_original,
+                  TRIM(REGEXP_REPLACE(
+                      LOWER(TRANSLATE(
+                          REPLACE(REPLACE(REPLACE(nm_original, '''', ''), '’', ''), '´', ''),
+                          'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑáàâãäéèêëíìîïóòôõöúùûüçñ',
+                          'AAAAAEEEEIIIIOOOOOUUUUCNaaaaaeeeeiiiiooooouuuucn')),
+                      '[^a-z0-9]+', ' ')) AS n1
+           FROM  (SELECT DISTINCT nm_original
+                  FROM   base
+                  WHERE  nm_original IS NOT NULL) d) t
+),
+
+-- grafias normalizadas + data do 1º cadastro de cada uma
+grafias AS (
+    SELECT n.chave,
+           REPLACE(n.chave, ' ', '')                                AS chave_ns,
+           LENGTH(n.chave) - LENGTH(REPLACE(n.chave, ' ', '')) + 1  AS qt_palavras,
+           MIN(b.dt_cadastro)                                       AS dt_grafia
+    FROM   base  b
+    JOIN   nomes n ON n.nm_original = b.nm_original
+    WHERE  n.chave IS NOT NULL
+    GROUP  BY 1, 2, 3
+),
+
+-- chave sem espaço ('cacau show' = 'cacaushow'); exibição = grafia mais antiga
+chaves AS (
+    SELECT chave_ns,
+           chave AS disp,
+           qt_palavras,
+           dt_chave
+    FROM  (SELECT g.*,
+                  MIN(g.dt_grafia) OVER (PARTITION BY g.chave_ns) AS dt_chave,
+                  ROW_NUMBER()     OVER (PARTITION BY g.chave_ns
+                                         ORDER BY g.dt_grafia, g.qt_palavras DESC, g.chave) AS rk
+           FROM   grafias g) t
+    WHERE  rk = 1
+),
+
+-- 2) APROXIMAÇÃO por prefixo em palavras inteiras
+digitos AS (
+              SELECT 0 AS d UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3
+    UNION ALL SELECT 4      UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7
+    UNION ALL SELECT 8      UNION ALL SELECT 9
+),
+nums AS (                                   -- 1..100
+    SELECT a.d * 10 + b.d + 1 AS n
+    FROM   digitos a CROSS JOIN digitos b
+),
+prefixos AS (                               -- 'cacau show shopping' -> cacau | cacaushow | cacaushowshopping
+    SELECT c.chave_ns,
+           LEFT(c.chave_ns,
+                CAST(SUM(LENGTH(SPLIT_PART(c.disp, ' ', x.n)))
+                     OVER (PARTITION BY c.chave_ns ORDER BY x.n
+                           ROWS UNBOUNDED PRECEDING) AS INT)) AS prefixo_ns
+    FROM   chaves c
+    JOIN   nums   x ON x.n <= c.qt_palavras
+),
+grupos AS (                                 -- prefixo mais curto (2+ palavras) que já existia
+    SELECT chave_ns, chave_grupo
+    FROM  (SELECT k.chave_ns,
+                  a.chave_ns AS chave_grupo,
+                  ROW_NUMBER() OVER (PARTITION BY k.chave_ns
+                                     ORDER BY LENGTH(a.chave_ns), a.dt_chave, a.chave_ns) AS rk
+           FROM   chaves   k
+           JOIN   prefixos p ON p.chave_ns = k.chave_ns
+           JOIN   chaves   a ON a.chave_ns = p.prefixo_ns
+                            AND a.qt_palavras >= 2
+                            AND a.dt_chave <= k.dt_chave) t
+    WHERE  rk = 1
+),
+
+-- 3) RESULTADO: 1 linha por IDT
+resultado AS (
+    SELECT b.idt_safepay_user,
+           b.nm_original,
+           k.chave_ns,
+           COALESCE(g.chave_grupo, k.chave_ns) AS chave_grupo,
+           COALESCE(e1.nm_oficial, e2.nm_oficial,
+               TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                   ' ' || INITCAP(a.disp) || ' ',
+                   ' De ', ' de '), ' Da ', ' da '), ' Do ', ' do '),
+                   ' Das ', ' das '), ' Dos ', ' dos '), ' E ', ' e '))) AS nm_parceiro
+    FROM   base b
+    LEFT   JOIN nomes    n  ON n.nm_original = b.nm_original
+    LEFT   JOIN chaves   k  ON k.chave_ns    = REPLACE(n.chave, ' ', '')
+    LEFT   JOIN grupos   g  ON g.chave_ns    = k.chave_ns
+    LEFT   JOIN chaves   a  ON a.chave_ns    = COALESCE(g.chave_grupo, k.chave_ns)
+    LEFT   JOIN excecoes e1 ON e1.chave_ns   = k.chave_ns
+    LEFT   JOIN excecoes e2 ON e2.chave_ns   = COALESCE(g.chave_grupo, k.chave_ns)
+)
+
+-- >>> para trazer TPV/MO na mesma consulta, junte aqui por idt_safepay_user
+SELECT * FROM resultado
+
+/* ============================================================================
+   CONFERÊNCIA — para revisar, troque o "SELECT * FROM resultado" acima por
+   um dos blocos abaixo (as CTEs continuam iguais).
+
+   (A) Grupos e as grafias que caíram em cada um
+SELECT nm_parceiro,
+       chave_grupo,
+       SUM(qt_idts) AS qt_idts,
+       COUNT(*)     AS qt_grafias,
+       LISTAGG(chave_ns || ' (' || CAST(qt_idts AS VARCHAR) || ')', ' | ')
+           WITHIN GROUP (ORDER BY qt_idts DESC) AS grafias
+FROM  (SELECT nm_parceiro, chave_grupo, chave_ns, COUNT(*) AS qt_idts
+       FROM   resultado
+       WHERE  chave_ns IS NOT NULL
+       GROUP  BY 1, 2, 3) t
+GROUP  BY 1, 2
+ORDER  BY qt_idts DESC
+
+   (B) Possíveis duplicados (erro de digitação), similaridade de 0 a 1.
+       É só sugestão: revise e, se for o mesmo parceiro, inclua em EXCEÇÕES.
+       Não automatize: 'farmacia sao joao' x 'farmacia sao jose' também passa de 0,8.
+SELECT s.grupo_a, ga.nm_parceiro AS nome_a, ga.qt_idts AS idts_a,
+       s.grupo_b, gb.nm_parceiro AS nome_b, gb.qt_idts AS idts_b,
+       s.similaridade
+FROM  (SELECT x.chave_grupo AS grupo_a,
+              y.chave_grupo AS grupo_b,
+              ROUND(2.0 * COUNT(*) / (MAX(x.qt) + MAX(y.qt)), 2) AS similaridade
+       FROM  (SELECT chave_grupo, bg, COUNT(*) OVER (PARTITION BY chave_grupo) AS qt
+              FROM  (SELECT DISTINCT r.chave_grupo, SUBSTRING(r.chave_grupo, p.n, 2) AS bg
+                     FROM  (SELECT DISTINCT chave_grupo FROM resultado WHERE chave_grupo IS NOT NULL) r
+                     JOIN   nums p ON p.n < LENGTH(r.chave_grupo)) d) x
+       JOIN  (SELECT chave_grupo, bg, COUNT(*) OVER (PARTITION BY chave_grupo) AS qt
+              FROM  (SELECT DISTINCT r.chave_grupo, SUBSTRING(r.chave_grupo, p.n, 2) AS bg
+                     FROM  (SELECT DISTINCT chave_grupo FROM resultado WHERE chave_grupo IS NOT NULL) r
+                     JOIN   nums p ON p.n < LENGTH(r.chave_grupo)) d) y
+              ON  y.bg = x.bg
+              AND LEFT(y.chave_grupo, 2) = LEFT(x.chave_grupo, 2)
+              AND x.chave_grupo < y.chave_grupo
+       GROUP  BY 1, 2) s
+JOIN  (SELECT chave_grupo, MAX(nm_parceiro) AS nm_parceiro, COUNT(*) AS qt_idts
+       FROM   resultado GROUP BY 1) ga ON ga.chave_grupo = s.grupo_a
+JOIN  (SELECT chave_grupo, MAX(nm_parceiro) AS nm_parceiro, COUNT(*) AS qt_idts
+       FROM   resultado GROUP BY 1) gb ON gb.chave_grupo = s.grupo_b
+WHERE  s.similaridade >= 0.8
+ORDER  BY s.similaridade DESC
+   ========================================================================== */
