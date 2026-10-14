@@ -1,0 +1,397 @@
+-- =====================================================================
+-- refDimClienteUnico.sql — chave e nome únicos e estáveis por cliente (redshift)
+-- =====================================================================
+-- chave (relacionamento)
+--   G_<grouper>   empresas/web com cod_customer_grouper
+--   P_<parceiro>  novos negócios: parceiro normalizado e agrupado por aproximação
+--   N_<nome>      empresas/web sem grouper: nome normalizado, sem aproximação
+--                 (nomes parecidos de pessoas/empresas costumam ser clientes diferentes)
+--
+-- nome exibido (cliente_unico): nome do idt mais antigo (menor idt_safepay_user)
+--   no 1º mês em que a chave aparece com nome. idt novo sempre tem número maior,
+--   então nunca troca o nome, mesmo com carga diária. não usa tpv.
+--
+-- normalização: sem acento, maiúsculas, pontuação/hífen viram espaço, apóstrofo sai;
+--   tira do fim S/A, SA, S, LTDA, ME, EPP, EIRELI, MEI
+--   (P_ e G_ também LOJA, FILIAL, UNIDADE, FRANQUIA, MATRIZ e nº da unidade)
+--
+-- aproximação (P_ e dentro de cada G_): o nome entra no grupo do prefixo mais curto,
+--   em palavras inteiras (mín. 2), que já existia antes (mês anterior, ou mesmo
+--   mês em idt mais antigo).
+--   'CACAU SHOW SHOPPING MORUMBI' -> 'CACAU SHOW'. nome novo nunca muda grupo antigo.
+--
+-- manutenção
+--   * não altere a data de início (2024-01-01): é a âncora do "1º mês"
+--   * ajustes manuais só em #excecoes (passo 0)
+--   * os fatos devem pegar a chave na saída (a), no fim do script
+-- =====================================================================
+
+
+-- 0) exceções manuais: 1 linha por chave (versione no git) ----------------
+drop table if exists #excecoes;
+create temp table #excecoes (
+    chave_calculada varchar(300)   -- chave gerada pelo script (ex.: P_CACAUSHO)
+  , chave_destino   varchar(300)   -- preencha para juntar em outra chave
+  , nome_oficial    varchar(300)   -- preencha para forçar o nome exibido
+);
+-- insert into #excecoes values
+--     ('P_CACAUSHO', 'P_CACAUSHOW', null)           -- junta erro de digitação
+--   , ('G_12345',    null,          'CACAU SHOW')   -- força o nome exibido
+-- ;
+
+
+-- 1) carteira foto (jan/2026) ---------------------------------------------
+drop table if exists #carteira_foto;
+create temp table #carteira_foto
+distkey(idt_safepay_user)
+sortkey(idt_safepay_user)
+as
+select distinct
+       idt_safepay_user
+     , case when cod_customer_grouper in (60957,22834,22836,43156639,22570,26729,17655,22835,24913,6006) then 'Web'
+            when des_portfolio = 'Empresas' and des_segment like '%Web%' then 'Web'
+            else des_portfolio end as des_portfolio
+from   dax_share_dax.ent_customer_portfolio_psp
+where  dat_reference = last_day('2026-01-01'::date)
+and    des_segment <> 'Clientes internos';
+
+
+-- 2) base: 1 linha por idt x mês (último retrato do mês) ------------------
+drop table if exists #base_cliente;
+create temp table #base_cliente
+distkey(idt_safepay_user)
+sortkey(dat_reference, idt_safepay_user)
+as
+select idt_safepay_user
+     , dat_reference
+     , carteira
+     , cod_customer_grouper
+     , case when carteira = 'Novos Negócios'              then 'P'
+            when coalesce(cod_customer_grouper, -1) <> -1 then 'G'
+            else 'N' end as tp_chave
+     , case when carteira = 'Novos Negócios'              then 'P'
+            when coalesce(cod_customer_grouper, -1) <> -1 then 'G_' || cod_customer_grouper::varchar
+       end as escopo                                       -- universo da aproximação
+     , case when carteira = 'Novos Negócios' then nam_business_partner
+            else nome_cadastro end as nome_bruto
+from  (select ecpp.idt_safepay_user
+            , date_trunc('month', ecpp.dat_reference)::date as dat_reference
+            , case when ecpp.cod_customer_grouper in (60957,22834,22836,43156639,22570,26729,17655,22835,24913,6006) then 'Web'
+                   when last_day(ecpp.dat_reference) <= last_day('2025-12-01'::date) then foto.des_portfolio
+                   when ecpp.des_portfolio = 'Empresas' and ecpp.des_segment like '%Web%' then 'Web'
+                   else coalesce(ecpp.des_portfolio, 'Varejo') end as carteira
+            , ecpp.cod_customer_grouper
+            , ecpp.nam_business_partner
+            , case when coalesce(upper(trim(ecp.nam_seller_chain)), '')  not in ('', 'NI') then ecp.nam_seller_chain
+                   when coalesce(upper(trim(ecp.nam_leg_ent_corp)), '')  not in ('', 'NI') then ecp.nam_leg_ent_corp
+                   when coalesce(upper(trim(ecp.nam_leg_ent_trade)), '') not in ('', 'NI') then ecp.nam_leg_ent_trade
+                   else ecp.nam_ind end as nome_cadastro
+            , row_number() over (partition by ecpp.idt_safepay_user, date_trunc('month', ecpp.dat_reference)
+                                 order by ecpp.dat_reference desc, foto.des_portfolio, ecpp.des_portfolio,
+                                          ecpp.des_segment, ecpp.cod_customer_grouper, ecpp.nam_business_partner) as rn
+       from   dax_share_dax.ent_customer_portfolio_psp ecpp
+       join   dax_share_dax.ent_customer_psp ecp
+              on  ecp.idt_safepay_user = ecpp.idt_safepay_user
+       left   join #carteira_foto foto
+              on  foto.idt_safepay_user = ecpp.idt_safepay_user
+       where  ecpp.dat_reference >= '2024-01-01'            -- âncora: não alterar
+      ) t
+where  rn = 1
+and    carteira in ('Empresas', 'Web', 'Novos Negócios');
+
+
+-- 3) normalização (1 vez por nome distinto) -------------------------------
+drop table if exists #nome_normalizado;
+create temp table #nome_normalizado
+as
+select tp_chave
+     , nome_bruto
+     , nome_norm
+     , replace(nome_norm, ' ', '')                                  as chave_nome
+     , length(nome_norm) - length(replace(nome_norm, ' ', '')) + 1  as qt_palavras
+from  (select tp_chave
+            , nome_bruto
+            , nullif(trim(case when tp_chave = 'N'
+                               then regexp_replace(nome_limpo, '( (S A|SA|S|LTDA|LIMITADA|ME|EPP|EIRELI|MEI))+$', '')
+                               else regexp_replace(nome_limpo, '( (S A|SA|S|LTDA|LIMITADA|ME|EPP|EIRELI|MEI|LOJA|LJ|FILIAL|UNIDADE|FRANQUIA|MATRIZ|[0-9]+))+$', '')
+                          end), '') as nome_norm
+       from  (select distinct
+                     tp_chave
+                   , nome_bruto
+                   , trim(regexp_replace(
+                         upper(translate(
+                             replace(replace(replace(nome_bruto, '''', ''), '’', ''), '´', ''),
+                             'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑáàâãäéèêëíìîïóòôõöúùûüçñ',
+                             'AAAAAEEEEIIIIOOOOOUUUUCNaaaaaeeeeiiiiooooouuuucn')),
+                         '[^A-Z0-9]+', ' ')) as nome_limpo
+              from   #base_cliente
+              where  nome_bruto is not null) d
+      ) t;
+
+
+-- 4) números 1..100 (posição das palavras) --------------------------------
+drop table if exists #nums;
+create temp table #nums
+as
+select a.d * 10 + b.d + 1 as n
+from  (select 0 as d union all select 1 union all select 2 union all select 3 union all select 4
+       union all select 5 union all select 6 union all select 7 union all select 8 union all select 9) a
+cross  join
+      (select 0 as d union all select 1 union all select 2 union all select 3 union all select 4
+       union all select 5 union all select 6 union all select 7 union all select 8 union all select 9) b;
+
+
+-- 5) aproximação: grupo de cada nome (P_ no geral; G_ dentro do grouper) ---
+drop table if exists #nome_escopo;
+create temp table #nome_escopo
+as
+select escopo, chave_nome, nome_norm, qt_palavras, dt_grafia, idt_grafia
+from  (select b.escopo
+            , n.chave_nome
+            , n.nome_norm
+            , n.qt_palavras
+            , b.dat_reference           as dt_grafia            -- 1ª aparição da grafia
+            , min(b.idt_safepay_user)   as idt_grafia           -- idt mais antigo com ela nesse mês
+            , row_number() over (partition by b.escopo, n.nome_norm order by b.dat_reference) as rn
+       from   #base_cliente b
+       join   #nome_normalizado n
+              on  n.tp_chave   = b.tp_chave
+              and n.nome_bruto = b.nome_bruto
+       where  b.escopo is not null
+       and    n.nome_norm is not null
+       group  by 1, 2, 3, 4, 5) t
+where  rn = 1;
+
+-- "quando o nome surgiu" = (mês, idt mais antigo): idt novo nunca fica antes de um antigo
+drop table if exists #nome_chave;
+create temp table #nome_chave
+as
+select escopo
+     , chave_nome
+     , dt_chave                                                                      -- 1ª aparição do nome
+     , min(case when dt_grafia = dt_chave then idt_grafia end)                      as idt_chave
+     , dt_base                                                                       -- desde quando pode ser base (2+ palavras)
+     , min(case when qt_palavras >= 2 and dt_grafia = dt_base then idt_grafia end)  as idt_base
+from  (select e.*
+            , min(dt_grafia) over (partition by escopo, chave_nome) as dt_chave
+            , min(case when qt_palavras >= 2 then dt_grafia end)
+                  over (partition by escopo, chave_nome)            as dt_base
+       from   #nome_escopo e) t
+group  by escopo, chave_nome, dt_chave, dt_base;
+
+-- prefixos em palavras inteiras: 'CACAU SHOW MORUMBI' -> CACAU | CACAUSHOW | CACAUSHOWMORUMBI
+-- (só a grafia de quando o nome surgiu, para o conjunto não mudar depois)
+drop table if exists #prefixo;
+create temp table #prefixo
+as
+select distinct
+       escopo
+     , chave_nome
+     , left(chave_nome, cast(tam as int)) as prefixo
+from  (select e.escopo
+            , e.chave_nome
+            , sum(length(split_part(e.nome_norm, ' ', x.n)))
+                  over (partition by e.escopo, e.nome_norm
+                        order by x.n rows unbounded preceding) as tam
+       from   #nome_escopo e
+       join   #nome_chave c
+              on  c.escopo     = e.escopo
+              and c.chave_nome = e.chave_nome
+              and c.dt_chave   = e.dt_grafia
+              and c.idt_chave  = e.idt_grafia
+       join   #nums x
+              on  x.n <= e.qt_palavras) t;
+
+-- base = prefixo mais curto (2+ palavras) que já existia quando o nome surgiu
+drop table if exists #grupo_nome;
+create temp table #grupo_nome
+as
+select escopo
+     , chave_nome
+     , chave_base
+from  (select k.escopo
+            , k.chave_nome
+            , a.chave_nome as chave_base
+            , row_number() over (partition by k.escopo, k.chave_nome
+                                 order by length(a.chave_nome), a.dt_base, a.idt_base, a.chave_nome) as rn
+       from   #nome_chave k
+       join   #prefixo p
+              on  p.escopo     = k.escopo
+              and p.chave_nome = k.chave_nome
+       join   #nome_chave a
+              on  a.escopo     = p.escopo
+              and a.chave_nome = p.prefixo
+              and (   a.dt_base < k.dt_chave
+                   or (a.dt_base = k.dt_chave and a.idt_base <= k.idt_chave))
+      ) t
+where  rn = 1;
+
+
+-- 6) chave de cada idt x mês ----------------------------------------------
+drop table if exists #base_chave;
+create temp table #base_chave
+distkey(idt_safepay_user)
+sortkey(chave_calculada, dat_reference)
+as
+select b.idt_safepay_user
+     , b.dat_reference
+     , b.carteira
+     , b.tp_chave
+     , b.cod_customer_grouper
+     , n.nome_norm
+     , coalesce(g2.chave_base, g1.chave_base, n.chave_nome) as chave_base
+     , case b.tp_chave
+            when 'G' then b.escopo
+            when 'P' then 'P_' || coalesce(g2.chave_base, g1.chave_base, n.chave_nome, 'SEMPARCEIRO')
+            else          'N_' || coalesce(n.chave_nome, 'SEMCADASTRO')
+       end as chave_calculada
+from   #base_cliente b
+left   join #nome_normalizado n
+       on  n.tp_chave   = b.tp_chave
+       and n.nome_bruto = b.nome_bruto
+left   join #grupo_nome g1
+       on  g1.escopo     = b.escopo
+       and g1.chave_nome = n.chave_nome
+left   join #grupo_nome g2                                -- base da base (grafias com espaços diferentes)
+       on  g2.escopo     = g1.escopo
+       and g2.chave_nome = g1.chave_base;
+
+
+-- 7) candidatos a nome: idts da chave no 1º mês com nome (sem tpv) ------
+drop table if exists #candidato;
+create temp table #candidato
+as
+select chave_calculada
+     , chave_base
+     , nome_norm
+     , min(idt_safepay_user) as idt_min                    -- idt mais antigo com esse nome
+from  (select bc.*
+            , min(case when bc.nome_norm is not null then bc.dat_reference end)
+                  over (partition by bc.chave_calculada) as dt_decisao
+       from   #base_chave bc) x
+where  dat_reference = dt_decisao
+and    nome_norm is not null
+group  by 1, 2, 3;
+
+
+-- 8) dimensão: 1 nome por chave --------------------------------------------
+drop table if exists #dim_cliente;
+create temp table #dim_cliente
+as
+select k.cliente_unico_key
+     , coalesce(e.nome_oficial, w.nome_escolhido,
+                case when k.tp_chave = 'P' then 'SEM PARCEIRO' else 'SEM CADASTRO' end) as cliente_unico
+     , k.cod_customer_grouper
+from  (select distinct
+              chave_calculada as cliente_unico_key
+            , tp_chave
+            , case when tp_chave = 'G' then cod_customer_grouper else -1 end as cod_customer_grouper
+       from   #base_chave) k
+left   join (select chave_calculada
+                  , nome_escolhido
+             from  (select v.chave_calculada
+                         , coalesce(f.nome_norm, v.chave_base) as nome_escolhido
+                         , row_number() over (partition by v.chave_calculada
+                                              order by v.idt_min, v.chave_base,
+                                                       f.idt_min, f.nome_norm) as rn
+                    from  (select chave_calculada
+                                , chave_base
+                                , min(idt_min) as idt_min          -- nome do idt mais antigo vence
+                           from   #candidato
+                           group  by 1, 2) v
+                    left   join #candidato f                         -- grafia exibida = forma exata do nome
+                           on  f.chave_calculada = v.chave_calculada
+                           and f.chave_base      = v.chave_base
+                           and replace(f.nome_norm, ' ', '') = v.chave_base
+                   ) r
+             where  rn = 1) w
+       on  w.chave_calculada = k.cliente_unico_key
+left   join #excecoes e
+       on  e.chave_calculada = k.cliente_unico_key
+       and e.nome_oficial is not null
+where  not exists (select 1
+                   from   #excecoes x
+                   where  x.chave_calculada = k.cliente_unico_key
+                   and    x.chave_destino is not null);
+
+
+-- 9) saída: dimensão (1 linha por chave) -----------------------------------
+select cliente_unico_key
+     , cliente_unico
+     , cod_customer_grouper
+from   #dim_cliente;
+
+
+-- =====================================================================
+-- saídas alternativas e conferência: troque o select do passo 9 por uma
+-- =====================================================================
+-- (a) de-para para os fatos: idt x mês -> chave e nome
+-- select b.dat_reference
+--      , b.idt_safepay_user
+--      , coalesce(e.chave_destino, b.chave_calculada) as cliente_unico_key
+--      , d.cliente_unico
+--      , d.cod_customer_grouper
+-- from   #base_chave b
+-- left   join #excecoes e
+--        on  e.chave_calculada = b.chave_calculada
+--        and e.chave_destino is not null
+-- left   join #dim_cliente d
+--        on  d.cliente_unico_key = coalesce(e.chave_destino, b.chave_calculada);
+--
+-- (b) grafias agrupadas em cada chave
+-- select d.cliente_unico_key
+--      , d.cliente_unico
+--      , count(*) as qt_grafias
+--      , listagg(g.nome_norm || ' (' || g.qt_idts::varchar || ')', ' | ')
+--            within group (order by g.qt_idts desc) as grafias
+-- from  (select chave_calculada, nome_norm, count(distinct idt_safepay_user) as qt_idts
+--        from   #base_chave
+--        where  nome_norm is not null
+--        group  by 1, 2) g
+-- join   #dim_cliente d
+--        on d.cliente_unico_key = g.chave_calculada
+-- group  by 1, 2
+-- having count(*) > 1
+-- order  by qt_grafias desc;
+--
+-- (c) possíveis duplicados por digitação, P_ com P_ e N_ com N_ (só sugestão: confirme e use #excecoes)
+-- select s.chave_a, a.cliente_unico as nome_a
+--      , s.chave_b, b.cliente_unico as nome_b
+--      , s.similaridade
+-- from  (select x.k as chave_a
+--             , y.k as chave_b
+--             , round(2.0 * count(*) / (max(x.qt) + max(y.qt)), 2) as similaridade
+--        from  (select k, bg, count(*) over (partition by k) as qt
+--               from  (select distinct d.cliente_unico_key as k
+--                           , substring(d.cliente_unico_key, n.n + 2, 2) as bg
+--                      from   #dim_cliente d
+--                      join   #nums n on n.n < length(d.cliente_unico_key) - 2
+--                      where  left(d.cliente_unico_key, 2) in ('P_', 'N_')) t1) x
+--        join  (select k, bg, count(*) over (partition by k) as qt
+--               from  (select distinct d.cliente_unico_key as k
+--                           , substring(d.cliente_unico_key, n.n + 2, 2) as bg
+--                      from   #dim_cliente d
+--                      join   #nums n on n.n < length(d.cliente_unico_key) - 2
+--                      where  left(d.cliente_unico_key, 2) in ('P_', 'N_')) t2) y
+--              on  y.bg = x.bg
+--              and left(y.k, 4) = left(x.k, 4)
+--              and x.k < y.k
+--        group  by 1, 2) s
+-- join   #dim_cliente a on a.cliente_unico_key = s.chave_a
+-- join   #dim_cliente b on b.cliente_unico_key = s.chave_b
+-- where  s.similaridade >= 0.8
+-- order  by s.similaridade desc;
+--
+-- (d) chaves P_ que começam com outra chave P_ (candidatas a juntar via #excecoes)
+-- select a.cliente_unico_key as chave_curta, a.cliente_unico as nome_curto
+--      , b.cliente_unico_key as chave_longa, b.cliente_unico as nome_longo
+-- from   #dim_cliente a
+-- join   #dim_cliente b
+--        on  left(b.cliente_unico_key, length(a.cliente_unico_key)) = a.cliente_unico_key
+--        and b.cliente_unico_key <> a.cliente_unico_key
+-- where  left(a.cliente_unico_key, 2) = 'P_'
+-- and    left(b.cliente_unico_key, 2) = 'P_'
+-- order  by 1, 3;
+--
+-- (e) garantia de 1 linha por chave: precisa voltar vazio
+-- select cliente_unico_key, count(*) from #dim_cliente group by 1 having count(*) > 1;
